@@ -16,26 +16,22 @@
   #map { position:absolute; inset:0; }
   .card { position:absolute; left:12px; right:12px; z-index:1000; background:var(--card);
     border-radius:16px; padding:12px 16px; box-shadow:0 6px 24px rgba(0,0,0,.4); backdrop-filter:blur(6px); }
-  #top { top:calc(12px + env(safe-area-inset-top)); }
-  #bottom { bottom:calc(12px + env(safe-area-inset-bottom)); display:flex; gap:14px; align-items:center; }
+  #top { top:calc(12px + env(safe-area-inset-top)); padding:14px 18px; }
+  #dirRow { display:flex; align-items:baseline; gap:10px; padding-bottom:10px; border-bottom:1px solid #2a2f3a; }
+  #dir { font-size:44px; font-weight:800; line-height:1; color:#7fb2ff; }
+  #dirWord { font-size:15px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; flex:1; }
+  #speedBox { font-size:14px; color:var(--dim); cursor:pointer; white-space:nowrap; }
+  #speed { font-size:20px; font-weight:700; color:var(--fg); font-variant-numeric:tabular-nums; }
+  .section { padding:10px 0; border-bottom:1px solid #2a2f3a; }
   .label { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
-  #street { font-size:28px; font-weight:700; line-height:1.15; margin-top:2px; }
-  #speedBox { text-align:center; min-width:96px; border-right:1px solid #2a2f3a; padding-right:14px; cursor:pointer; }
-  #speed { font-size:48px; font-weight:800; line-height:1; font-variant-numeric:tabular-nums; }
-  #unit { font-size:13px; color:var(--dim); }
-  #nextBox { flex:1; min-width:0; }
-  #next { font-size:22px; font-weight:700; color:var(--accent); line-height:1.2; }
-  #nextDist { font-size:15px; color:var(--dim); margin-top:2px; font-variant-numeric:tabular-nums; }
-  #topRow { display:flex; gap:12px; align-items:center; }
-  #topMain { flex:1; min-width:0; }
-  #dirBox { text-align:center; min-width:70px; border-left:1px solid #2a2f3a; padding-left:12px; }
-  #dir { font-size:34px; font-weight:800; line-height:1; color:#7fb2ff; }
-  #dirWord { font-size:11px; color:var(--dim); margin-top:3px; text-transform:uppercase; letter-spacing:.06em; }
-  #status { font-size:12px; color:var(--dim); margin-top:4px; }
+  #street { font-size:30px; font-weight:700; line-height:1.15; margin-top:2px; }
+  #next { font-size:30px; font-weight:700; line-height:1.15; margin-top:2px; color:var(--accent); }
+  #nextDist { font-size:17px; color:var(--dim); margin-top:2px; font-variant-numeric:tabular-nums; }
+  #status { font-size:12px; color:var(--dim); margin-top:8px; }
   .btn { position:absolute; z-index:1000; right:12px; background:var(--card); color:var(--fg); border:0;
     border-radius:12px; padding:10px 12px; font-size:14px; font-weight:600; }
-  #recenter { top:calc(110px + env(safe-area-inset-top)); display:none; }
-  #demoBtn { top:calc(160px + env(safe-area-inset-top)); }
+  #recenter { bottom:calc(70px + env(safe-area-inset-bottom)); display:none; }
+  #demoBtn { bottom:calc(20px + env(safe-area-inset-bottom)); }
   #demoBtn.on { background:var(--accent); color:#111; }
   #start { position:absolute; inset:0; z-index:2000; background:var(--bg); display:flex; flex-direction:column;
     align-items:center; justify-content:center; gap:16px; padding:24px; text-align:center; }
@@ -52,36 +48,28 @@
 <div id="map"></div>
 
 <div id="top" class="card">
-  <div id="topRow">
-    <div id="topMain">
-      <div class="label">You're on</div>
-      <div id="street">—</div>
-    </div>
-    <div id="dirBox">
-      <div id="dir">—</div>
-      <div id="dirWord">Heading</div>
-    </div>
+  <div id="dirRow">
+    <div id="dir">—</div>
+    <div id="dirWord">Heading</div>
+    <div id="speedBox" title="Tap to switch units"><span id="speed">0</span> <span id="unit">km/h</span></div>
   </div>
-  <div id="status">Waiting for GPS…</div>
-</div>
-
-<div id="bottom" class="card">
-  <div id="speedBox" title="Tap to switch units">
-    <div id="speed">0</div>
-    <div id="unit">km/h</div>
+  <div class="section">
+    <div class="label">You're on</div>
+    <div id="street">—</div>
   </div>
-  <div id="nextBox">
+  <div class="section">
     <div class="label">Approaching</div>
     <div id="next">—</div>
     <div id="nextDist"></div>
   </div>
+  <div id="status">Waiting for GPS…</div>
 </div>
 
 <button id="recenter" class="btn">◎ Follow</button>
 <button id="demoBtn" class="btn">Demo</button>
 
 <div id="start">
-  <h1>Streetwise <span style="font-size:14px;color:var(--dim)">v6</span></h1>
+  <h1>Streetwise <span style="font-size:14px;color:var(--dim)">v7</span></h1>
   <p>Shows the street you're on, your speed, and the next cross street ahead. Uses your phone's GPS and OpenStreetMap.</p>
   <button id="go">Start</button>
   <button id="goDemo" class="ghost">Try demo (tap the map to drive)</button>
@@ -92,7 +80,7 @@
 </script>
 <script>
 // ---------- settings ----------
-const VERSION = "v6";
+const VERSION = "v7";
 const TZ = 14;                             // street data is loaded in zoom-14 tiles (~1.5 km squares)
 const KEEP_RADIUS = 4000;                  // m: drop squares from memory beyond this
 const CACHE_DAYS = 30;                     // squares are saved on the phone this long
