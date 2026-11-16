@@ -80,7 +80,12 @@ const FETCH_RADIUS = 700;      // m of road data to load around you
 const REFETCH_AFTER = 300;     // m moved from last load before reloading
 const LOOKAHEAD_MAX = 1500;    // m max distance to report a cross street
 const AHEAD_ANGLE = 55;        // deg either side of heading counts as "ahead"
-const OVERPASS = ["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+const OVERPASS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter"
+];
 
 // ---------- state ----------
 let useMph = false;
@@ -89,7 +94,8 @@ let follow = true, demo = false;
 let pos = null, heading = null, speedMs = 0;
 let lastPts = [];              // recent fixes for computed heading/speed
 let roads = { nodes:new Map(), ways:[] };
-let loadedAt = null, loading = false;
+let loadedAt = null, loading = false, retryAt = 0, roadMsg = "", gpsMsg = "";
+let fallbackName = null, lastNominatim = 0;
 let wakeLock = null;
 
 // ---------- map ----------
@@ -124,39 +130,51 @@ function segDist(p, a, b){ // p,a,b in xy
 
 // ---------- road data ----------
 async function loadRoads(center){
-  if (loading) return; loading = true;
-  setStatus("Loading streets…");
-  const q = `[out:json][timeout:20];way(around:${FETCH_RADIUS},${center[0]},${center[1]})["highway"]["name"]["highway"!~"footway|cycleway|path|steps|bridleway|corridor|platform|proposed|construction"];(._;>;);out body qt;`;
+  if (loading || Date.now() < retryAt) return; loading = true;
+  setRoadMsg("Loading streets…");
+  const q = `[out:json][timeout:25];way(around:${FETCH_RADIUS},${center[0].toFixed(5)},${center[1].toFixed(5)})["highway"]["name"]["highway"!~"footway|cycleway|path|steps|bridleway|corridor|platform|proposed|construction"];(._;>;);out body qt;`;
+  const errors = [];
   for (const url of OVERPASS){
+    const host = new URL(url).host;
     try {
-      const r = await fetch(url, { method:"POST", body:"data="+encodeURIComponent(q),
-        headers:{ "Content-Type":"application/x-www-form-urlencoded" } });
-      if (!r.ok) throw new Error(r.status);
+      const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 25000);
+      const r = await fetch(url + "?data=" + encodeURIComponent(q), { signal:ctl.signal });
+      clearTimeout(to);
+      if (!r.ok) throw new Error("HTTP " + r.status);
       const j = await r.json();
       const nodes = new Map(), ways = [];
-      for (const el of j.elements){
-        if (el.type === "node") nodes.set(el.id, [el.lat, el.lon]);
-      }
-      for (const el of j.elements){
+      for (const el of j.elements) if (el.type === "node") nodes.set(el.id, [el.lat, el.lon]);
+      for (const el of j.elements)
         if (el.type === "way" && el.tags && el.tags.name)
-          ways.push({ id:el.id, name:el.tags.name, ref:el.tags.ref, nodes:el.nodes, hw:el.tags.highway, oneway:el.tags.oneway });
-      }
-      // index: node id -> set of street names that use it
+          ways.push({ id:el.id, name:el.tags.name, nodes:el.nodes });
+      if (!ways.length) throw new Error("no streets returned");
       const nodeNames = new Map();
       for (const w of ways) for (const n of w.nodes){
         if (!nodeNames.has(n)) nodeNames.set(n, new Set());
         nodeNames.get(n).add(w.name);
       }
       roads = { nodes, ways, nodeNames };
-      loadedAt = center; loading = false;
-      setStatus(`${ways.length} street segments loaded`);
+      loadedAt = center; loading = false; lastName = null;
+      setRoadMsg(`${ways.length} streets loaded`);
       update();
       return;
-    } catch(e){ /* try next endpoint */ }
+    } catch(e){ errors.push(host.split(".")[0] + ": " + (e.name === "AbortError" ? "timeout" : e.message)); }
   }
   loading = false;
-  setStatus("Couldn't load street data — retrying soon");
-  setTimeout(() => { loadedAt = null; }, 10000);
+  retryAt = Date.now() + 20000;   // back off instead of hammering the servers
+  setRoadMsg("Street data failed (" + errors.join("; ") + ") — retrying in 20 s");
+}
+
+// Fallback: if the street map can't load, at least get the current street name
+async function nominatimName(){
+  if (!pos || Date.now() - lastNominatim < 5000) return;
+  lastNominatim = Date.now();
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=17&lat=${pos[0]}&lon=${pos[1]}`);
+    const j = await r.json();
+    fallbackName = (j.address && (j.address.road || j.address.pedestrian)) || null;
+    update();
+  } catch(e) {}
 }
 
 // ---------- core logic ----------
@@ -246,6 +264,11 @@ function update(){
   } else if (roads.ways.length){
     $("street").textContent = "Off road";
     $("next").textContent = "—"; $("nextDist").textContent = "";
+  } else {
+    nominatimName();
+    $("street").textContent = fallbackName || "—";
+    $("next").textContent = "Needs street data";
+    $("nextDist").textContent = "";
   }
 }
 
@@ -253,7 +276,9 @@ function fmtDist(m){
   if (useMph){ const ft = m*3.28084; return ft < 1000 ? `${Math.round(ft/10)*10} ft` : `${(m/1609.34).toFixed(1)} mi`; }
   return m < 1000 ? `${Math.round(m/10)*10} m` : `${(m/1000).toFixed(1)} km`;
 }
-function setStatus(t){ $("status").textContent = t; }
+function setStatus(t){ gpsMsg = t; renderStatus(); }
+function setRoadMsg(t){ roadMsg = t; renderStatus(); }
+function renderStatus(){ $("status").textContent = [gpsMsg, roadMsg].filter(Boolean).join(" · "); }
 
 // ---------- GPS ----------
 function onFix(p){
