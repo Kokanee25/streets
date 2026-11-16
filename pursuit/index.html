@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f1115">
+<title>Streetwise Pursuit</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --bg:#0f1115; --card:rgba(18,21,28,.94); --fg:#f2f4f8; --dim:#9aa3b2; --accent:#ffb020; --warn:#ff9f1a; --bad:#ff4d4d; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+  #map { position:absolute; inset:0; }
+  .card { position:absolute; left:12px; right:12px; z-index:1000; background:var(--card);
+    border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,.4); backdrop-filter:blur(6px); border:3px solid transparent; }
+  #top { top:calc(12px + env(safe-area-inset-top)); padding:12px 16px; transition:border-color .3s; }
+  #top.weak { border-color:var(--warn); }
+  #top.bad { border-color:var(--bad); }
+  #dirRow { display:flex; align-items:baseline; gap:10px; padding-bottom:8px; border-bottom:1px solid #2a2f3a; }
+  #dir { font-size:46px; font-weight:800; line-height:1; color:#7fb2ff; }
+  #dirWord { font-size:15px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; flex:1; }
+  #speedBox { font-size:14px; color:var(--dim); cursor:pointer; white-space:nowrap; }
+  #speed { font-size:20px; font-weight:700; color:var(--fg); font-variant-numeric:tabular-nums; }
+  .section { padding:8px 0; border-bottom:1px solid #2a2f3a; }
+  .label { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
+  #street { font-size:32px; font-weight:800; line-height:1.12; margin-top:2px; }
+  #streetSub { font-size:20px; font-weight:700; color:#cfd5e0; margin-top:2px; }
+  #streetSub:empty { display:none; }
+  #next { font-size:32px; font-weight:800; line-height:1.12; margin-top:2px; color:var(--accent); }
+  #nextDist { font-size:18px; color:var(--dim); margin-top:2px; font-variant-numeric:tabular-nums; }
+  #warn { display:none; margin-top:8px; padding:6px 10px; border-radius:8px; font-weight:700; font-size:15px; }
+  #top.weak #warn { display:block; background:rgba(255,159,26,.18); color:var(--warn); }
+  #top.bad #warn { display:block; background:rgba(255,77,77,.2); color:var(--bad); }
+  #status { font-size:12px; color:var(--dim); margin-top:6px; }
+  .btn { position:absolute; z-index:1000; right:12px; background:var(--card); color:var(--fg); border:0;
+    border-radius:12px; padding:10px 12px; font-size:14px; font-weight:600; }
+  #recenter { bottom:calc(70px + env(safe-area-inset-bottom)); display:none; }
+  #demoBtn { bottom:calc(20px + env(safe-area-inset-bottom)); }
+  #demoBtn.on { background:var(--accent); color:#111; }
+  #start { position:absolute; inset:0; z-index:2000; background:var(--bg); display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px; padding:24px; text-align:center; }
+  #start h1 { margin:0; font-size:32px; }
+  #start h1 span { font-size:14px; color:var(--dim); }
+  #start p { margin:0; color:var(--dim); max-width:340px; line-height:1.4; }
+  #start button { background:var(--accent); color:#111; border:0; border-radius:14px; padding:16px 28px; font-size:18px; font-weight:700; }
+  #start .ghost { background:transparent; color:var(--fg); border:1px solid #3a4150; font-size:15px; padding:12px 18px; }
+  #offline { font-size:13px; color:var(--dim); min-height:1.2em; }
+  .arrow { width:28px; height:28px; }
+  .arrow svg { width:28px; height:28px; transition:transform .25s; filter:drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="top" class="card">
+  <div id="dirRow">
+    <div id="dir">—</div>
+    <div id="dirWord">Heading</div>
+    <div id="speedBox" title="Tap to switch units"><span id="speed">0</span> <span id="unit">km/h</span></div>
+  </div>
+  <div class="section">
+    <div class="label">You're on</div>
+    <div id="street">—</div>
+    <div id="streetSub"></div>
+  </div>
+  <div class="section">
+    <div class="label">Approaching</div>
+    <div id="next">—</div>
+    <div id="nextDist"></div>
+  </div>
+  <div id="warn"></div>
+  <div id="status">Waiting for GPS…</div>
+</div>
+
+<button id="recenter" class="btn">◎ Follow</button>
+<button id="demoBtn" class="btn">Demo</button>
+
+<div id="start">
+  <h1>Streetwise Pursuit <span>p1</span></h1>
+  <p>Built for fast driving: back lanes, lag compensation, GPS warnings, and offline street data.</p>
+  <button id="go">Start</button>
+  <button id="dl" class="ghost">Download Winnipeg for offline use</button>
+  <div id="offline"></div>
+  <button id="goDemo" class="ghost">Try demo (tap the map to drive)</button>
+</div>
+
+<script>/* vector tile decoder: @mapbox/vector-tile + pbf (BSD) */
+(()=>{function x(e,t){this.x=e,this.y=t}x.prototype={clone(){return new x(this.x,this.y)},add(e){return this.clone()._add(e)},sub(e){return this.clone()._sub(e)},multByPoint(e){return this.clone()._multByPoint(e)},divByPoint(e){return this.clone()._divByPoint(e)},mult(e){return this.clone()._mult(e)},div(e){return this.clone()._div(e)},rotate(e){return this.clone()._rotate(e)},rotateAround(e,t){return this.clone()._rotateAround(e,t)},matMult(e){return this.clone()._matMult(e)},unit(){return this.clone()._unit()},perp(){return this.clone()._perp()},round(){return this.clone()._round()},mag(){return Math.sqrt(this.x*this.x+this.y*this.y)},equals(e){return this.x===e.x&&this.y===e.y},dist(e){return Math.sqrt(this.distSqr(e))},distSqr(e){let t=e.x-this.x,i=e.y-this.y;return t*t+i*i},angle(){return Math.atan2(this.y,this.x)},angleTo(e){return Math.atan2(this.y-e.y,this.x-e.x)},angleWith(e){return this.angleWithSep(e.x,e.y)},angleWithSep(e,t){return Math.atan2(this.x*t-this.y*e,this.x*e+this.y*t)},_matMult(e){let t=e[0]*this.x+e[1]*this.y,i=e[2]*this.x+e[3]*this.y;return this.x=t,this.y=i,this},_add(e){return this.x+=e.x,this.y+=e.y,this},_sub(e){return this.x-=e.x,this.y-=e.y,this},_mult(e){return this.x*=e,this.y*=e,this},_div(e){return this.x/=e,this.y/=e,this},_multByPoint(e){return this.x*=e.x,this.y*=e.y,this},_divByPoint(e){return this.x/=e.x,this.y/=e.y,this},_unit(){return this._div(this.mag()),this},_perp(){let e=this.y;return this.y=this.x,this.x=-e,this},_rotate(e){let t=Math.cos(e),i=Math.sin(e),n=t*this.x-i*this.y,r=i*this.x+t*this.y;return this.x=n,this.y=r,this},_rotateAround(e,t){let i=Math.cos(e),n=Math.sin(e),r=t.x+i*(this.x-t.x)-n*(this.y-t.y),s=t.y+n*(this.x-t.x)+i*(this.y-t.y);return this.x=r,this.y=s,this},_round(){return this.x=Math.round(this.x),this.y=Math.round(this.y),this},constructor:x};x.convert=function(e){if(e instanceof x)return e;if(Array.isArray(e))return new x(+e[0],+e[1]);if(e.x!==void 0&&e.y!==void 0)return new x(+e.x,+e.y);throw new Error("Expected [x, y] or {x, y} point format")};var y=class{constructor(t,i,n,r,s){for(this.properties=Object.create(null),this.extent=n,this.type=0,this.id=void 0,this._pbf=t,this._geometry=-1,this._keys=r,this._values=s;t.pos<i;){let h=t.readVarint();if(h===8)this.id=t.readVarint();else if(h===18){let o=t.readVarint()+t.pos;for(;t.pos<o;){let a=r[t.readVarint()],d=s[t.readVarint()];this.properties[a]=d}}else h===24?this.type=t.readVarint():(h===34&&(this._geometry=t.pos),t.skip(h))}}loadGeometry(){if(this._geometry<0)throw new Error("feature has no geometry");let t=this._pbf;t.pos=this._geometry;let i=t.readVarint()+t.pos,n=[],r,s=1,h=0,o=0,a=0;for(;t.pos<i;){if(h<=0){let d=t.readVarint();if(s=d&7,h=d>>3,h===0)continue}if(h--,s===1)o+=t.readSVarint(),a+=t.readSVarint(),r&&n.push(r),r=[new x(o,a)];else if(s===2)o+=t.readSVarint(),a+=t.readSVarint(),r&&r.push(new x(o,a));else if(s===7)r&&r.push(r[0].clone());else throw new Error(`unknown command ${s}`)}return r&&n.push(r),n}bbox(){if(this._geometry<0)throw new Error("feature has no geometry");let t=this._pbf;t.pos=this._geometry;let i=t.readVarint()+t.pos,n=1,r=0,s=0,h=0,o=1/0,a=-1/0,d=1/0,u=-1/0;for(;t.pos<i;){if(r<=0){let w=t.readVarint();if(n=w&7,r=w>>3,r===0)continue}if(r--,n===1||n===2)s+=t.readSVarint(),h+=t.readSVarint(),s<o&&(o=s),s>a&&(a=s),h<d&&(d=h),h>u&&(u=h);else if(n!==7)throw new Error(`unknown command ${n}`)}return[o,d,a,u]}toGeoJSON(t,i,n){let r=this.extent*Math.pow(2,n),s=this.extent*t,h=this.extent*i,o=this.loadGeometry();function a(l){return[(l.x+s)*360/r-180,360/Math.PI*Math.atan(Math.exp((1-(l.y+h)*2/r)*Math.PI))-90]}function d(l){return l.map(a)}let u;if(this.type===1){let l=[];for(let g of o)l.push(g[0]);let f=d(l);u=l.length===1?{type:"Point",coordinates:f[0]}:{type:"MultiPoint",coordinates:f}}else if(this.type===2){let l=o.map(d);u=l.length===1?{type:"LineString",coordinates:l[0]}:{type:"MultiLineString",coordinates:l}}else if(this.type===3){let l=P(o),f=[];for(let g of l)f.push(g.map(d));u=f.length===1?{type:"Polygon",coordinates:f[0]}:{type:"MultiPolygon",coordinates:f}}else throw new Error("unknown feature type");let w={type:"Feature",geometry:u,properties:this.properties};return this.id!=null&&(w.id=this.id),w}};y.types=["Unknown","Point","LineString","Polygon"];function P(e){let t=e.length;if(t<=1)return[e];let i=[],n,r;for(let s=0;s<t;s++){let h=k(e[s]);h!==0&&(r===void 0&&(r=h<0),r===h<0?(n&&i.push(n),n=[e[s]]):n&&n.push(e[s]))}return n&&i.push(n),i}function k(e){let t=0;for(let i=0,n=e.length,r=n-1,s,h;i<n;r=i++)s=e[i],h=e[r],t+=(h.x-s.x)*(s.y+h.y);return t}var V=class{constructor(t,i){for(this.version=1,this.name="",this.extent=4096,this.length=0,this._pbf=t,this._keys=[],this._values=[],this._features=[],i===void 0&&(i=t.length);t.pos<i;){let n=t.readVarint();n===10?this.name=t.readString():n===18?(this._features.push(t.pos),t.skip(n)):n===26?this._keys.push(t.readString()):n===34?this._values.push(m(t)):n===40?this.extent=t.readVarint():n===120?this.version=t.readVarint():t.skip(n)}this.length=this._features.length}feature(t){if(t<0||t>=this._features.length)throw new Error("feature index out of bounds");this._pbf.pos=this._features[t];let i=this._pbf.readVarint()+this._pbf.pos;return new y(this._pbf,i,this.extent,this._keys,this._values)}};function m(e){let t=null,i=e.readVarint()+e.pos;for(;e.pos<i;){let n=e.readVarint();t=n===10?e.readString():n===21?e.readFloat():n===25?e.readDouble():n===32?e.readVarint(!0):n===40?e.readVarint():n===48?e.readSVarint():n===56?e.readBoolean():(e.skip(n),null)}if(t==null)throw new Error("unknown feature value");return t}var F=class{constructor(t,i=t.length){let n=Object.create(null);for(;t.pos<i;){let r=t.readVarint();if(r===26){let s=new V(t,t.readVarint()+t.pos);s.length&&(n[s.name]=s)}else t.skip(r)}this.layers=n}};var M=12,_=typeof TextDecoder>"u"?null:new TextDecoder("utf-8"),E=0,B=1,S=2,D=5,p=class{constructor(t){this.buf=ArrayBuffer.isView(t)?t:new Uint8Array(t),this.dataView=new DataView(this.buf.buffer,this.buf.byteOffset,this.buf.byteLength),this.pos=0,this.type=0,this._valueStart=-1,this.length=this.buf.length}readFields(t,i,n=this.length){let r;for(;r=this.nextField(n);)t(r,i,this);return i}readMessage(t,i){return this.readFields(t,i,this.readVarint()+this.pos)}readFixed32(){let t=this.dataView.getUint32(this.pos,!0);return this.pos+=4,t}readSFixed32(){let t=this.dataView.getInt32(this.pos,!0);return this.pos+=4,t}readFixed64(){let t=this.dataView.getUint32(this.pos,!0)+this.dataView.getUint32(this.pos+4,!0)*4294967296;return this.pos+=8,t}readSFixed64(){let t=this.dataView.getUint32(this.pos,!0)+this.dataView.getInt32(this.pos+4,!0)*4294967296;return this.pos+=8,t}readFloat(){let t=this.dataView.getFloat32(this.pos,!0);return this.pos+=4,t}readDouble(){let t=this.dataView.getFloat64(this.pos,!0);return this.pos+=8,t}readVarint(t){let i=this.buf,n=i[this.pos++];if(n<128)return n;let r=n&127,s;return s=i[this.pos++],r|=(s&127)<<7,s<128||(s=i[this.pos++],r|=(s&127)<<14,s<128)||(s=i[this.pos++],r|=(s&127)<<21,s<128)?r:(s=i[this.pos],r|=(s&15)<<28,T(r,t,this))}readSVarint(){let t=this.readVarint();return t%2===1?(t+1)/-2:t/2}readBoolean(){return!!this.readVarint()}readString(){let t=this.readVarint()+this.pos,i=this.pos;return this.pos=t,t-i>=M&&_?_.decode(this.buf.subarray(i,t)):I(this.buf,i,t)}readBytes(){let t=this.readVarint()+this.pos,i=this.buf.subarray(this.pos,t);return this.pos=t,i}readPackedVarint(t=[],i){let n=this.readPackedEnd();for(;this.pos<n;)t.push(this.readVarint(i));return t}readPackedSVarint(t=[]){let i=this.readPackedEnd();for(;this.pos<i;)t.push(this.readSVarint());return t}readPackedBoolean(t=[]){let i=this.readPackedEnd();for(;this.pos<i;)t.push(this.readBoolean());return t}readPackedFloat(t=[]){let i=this.readPackedEnd();for(;this.pos<i;)t.push(this.readFloat());return t}readPackedDouble(t=[]){let i=this.readPackedEnd();for(;this.pos<i;)t.push(this.readDouble());return t}readPackedFixed32(t=[]){let i=this.readPackedEnd();for(;this.pos<i;)t.push(this.readFixed32());return t}readPackedSFixed32(t=[]){let i=this.readPackedEnd();for(;this.pos<i;)t.push(this.readSFixed32());return t}readPackedFixed64(t=[]){let i=this.readPackedEnd();for(;this.pos<i;)t.push(this.readFixed64());return t}readPackedSFixed64(t=[]){let i=this.readPackedEnd();for(;this.pos<i;)t.push(this.readSFixed64());return t}readPackedEnd(){return this.type===S?this.readVarint()+this.pos:this.pos+1}nextField(t=this.length){if(this.pos===this._valueStart&&this.skip(this.type),this.pos>=t)return 0;let i=this.readVarint();return this.type=i&7,this._valueStart=this.pos,i>>>3}skip(t){let i=t&7;if(i===E)for(;this.buf[this.pos++]>127;);else if(i===S)this.pos=this.readVarint()+this.pos;else if(i===D)this.pos+=4;else if(i===B)this.pos+=8;else throw new Error(`Unimplemented type: ${i}`)}};function T(e,t,i){let n=i.buf,r,s;if(s=n[i.pos++],r=(s&112)>>4,s<128||(s=n[i.pos++],r|=(s&127)<<3,s<128)||(s=n[i.pos++],r|=(s&127)<<10,s<128)||(s=n[i.pos++],r|=(s&127)<<17,s<128)||(s=n[i.pos++],r|=(s&127)<<24,s<128)||(s=n[i.pos++],r|=(s&1)<<31,s<128))return c(e,r,t);throw new Error("Expected varint not more than 10 bytes")}function c(e,t,i){return i?t*4294967296+(e>>>0):(t>>>0)*4294967296+(e>>>0)}function I(e,t,i){let n="",r=t;for(;r<i;){let s=e[r],h=null,o=s>239?4:s>223?3:s>191?2:1;if(r+o>i)break;let a,d,u;o===1?s<128&&(h=s):o===2?(a=e[r+1],(a&192)===128&&(h=(s&31)<<6|a&63,h<=127&&(h=null))):o===3?(a=e[r+1],d=e[r+2],(a&192)===128&&(d&192)===128&&(h=(s&15)<<12|(a&63)<<6|d&63,(h<=2047||h>=55296&&h<=57343)&&(h=null))):o===4&&(a=e[r+1],d=e[r+2],u=e[r+3],(a&192)===128&&(d&192)===128&&(u&192)===128&&(h=(s&15)<<18|(a&63)<<12|(d&63)<<6|u&63,(h<=65535||h>=1114112)&&(h=null))),h===null?(h=65533,o=1):h>65535&&(h-=65536,n+=String.fromCharCode(h>>>10&1023|55296),h=56320|h&1023),n+=String.fromCharCode(h),r+=o}return n}globalThis.decodeTile=e=>new F(new p(e));})();
+</script>
+<script>
+// ---------- settings ----------
+const VERSION = "p1";
+const TZ = 14;                    // street data in zoom-14 tiles (~1.5 km squares)
+const KEEP_RADIUS = 5000;         // m: tiles kept in memory around you
+const CACHE_DAYS = 60;
+const LOOKAHEAD_MAX = 1500;       // m: furthest cross street reported
+const AHEAD_ANGLE = 55;           // deg either side of heading counts as "ahead"
+const ON_STREET = 45;             // m: within this of a named road = on it
+const IN_LANE = 15;               // m: within this of a back lane = in it
+const STICKY = 6;                 // m: a new street must beat the current one by this much
+const MAX_LEAD = 1.2;             // s: max lag compensation
+const GPS_LATENCY = 0.4;          // s: typical delay between a GPS fix and the browser getting it
+const WPG = { s:49.70, n:50.02, w:-97.40, e:-96.90 };   // Winnipeg + Perimeter
+const OVERPASS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter"
+];
+
+// ---------- state ----------
+let useMph = false;
+try { useMph = localStorage.getItem("swp_mph") === "1"; } catch(e) {}
+let follow = true, demo = false;
+let fix = null;                      // last GPS fix {ll,t,acc,speed,heading}
+let pos = null, heading = null, speedMs = 0;   // best estimate of where you are NOW
+let lastPts = [];
+let roads = { ways:[], lanes:[], nodeNames:new Map(), grid:new Map(), laneGrid:new Map() };
+const cells = new Map();
+let pumping = false, roadMsg = "", gpsMsg = "";
+let shown = null, wakeLock = null;
+
+function $(id){ return document.getElementById(id); }
+
+// ---------- map ----------
+const map = L.map("map", { zoomControl:false }).setView([49.8951,-97.1384], 16);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom:19, attribution:'&copy; OpenStreetMap contributors' }).addTo(map);
+const arrowIcon = L.divIcon({ className:"arrow", iconSize:[28,28], iconAnchor:[14,14],
+  html:'<svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="12" fill="#2b7cff" stroke="#fff" stroke-width="2.5"/><path d="M14 6 L19.5 19 L14 16 L8.5 19 Z" fill="#fff"/></svg>' });
+const me = L.marker([0,0], { icon:arrowIcon, interactive:false });
+const nextMarker = L.circleMarker([0,0], { radius:8, color:"#ffb020", weight:3, fillOpacity:.3 });
+map.on("dragstart", () => { follow = false; $("recenter").style.display = "block"; });
+
+// ---------- geometry ----------
+const R = 6371000, rad = d => d*Math.PI/180, deg = r => r*180/Math.PI;
+function toXY(lat, lon, o){ return [rad(lon-o[1])*R*Math.cos(rad(o[0])), rad(lat-o[0])*R]; }
+function toLL(xy){ return [pos[0] + deg(xy[1]/R), pos[1] + deg(xy[0]/(R*Math.cos(rad(pos[0]))))]; }
+function dist(a, b){ const p = toXY(b[0],b[1],a); return Math.hypot(p[0],p[1]); }
+function bearing(a, b){
+  const y = Math.sin(rad(b[1]-a[1]))*Math.cos(rad(b[0]));
+  const x = Math.cos(rad(a[0]))*Math.sin(rad(b[0])) - Math.sin(rad(a[0]))*Math.cos(rad(b[0]))*Math.cos(rad(b[1]-a[1]));
+  return (deg(Math.atan2(y,x))+360)%360;
+}
+function angDiff(a, b){ let d = Math.abs(a-b)%360; return d>180 ? 360-d : d; }
+function lineDiff(a, b){ return Math.min(angDiff(a,b), angDiff((a+180)%360, b)); }   // ignores direction
+function closest(p, a, b){
+  const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
+  let t = L2 ? ((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L2 : 0; t = Math.max(0,Math.min(1,t));
+  return [a[0]+t*dx, a[1]+t*dy];
+}
+function segIntersect(p1, p2, p3, p4){
+  const d = (p2[0]-p1[0])*(p4[1]-p3[1]) - (p2[1]-p1[1])*(p4[0]-p3[0]);
+  if (Math.abs(d) < 1e-9) return null;
+  const t = ((p3[0]-p1[0])*(p4[1]-p3[1]) - (p3[1]-p1[1])*(p4[0]-p3[0])) / d;
+  const u = ((p3[0]-p1[0])*(p2[1]-p1[1]) - (p3[1]-p1[1])*(p2[0]-p1[0])) / d;
+  const e = 1e-6;
+  if (t < -e || t > 1+e || u < -e || u > 1+e) return null;
+  return [p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1])];
+}
+function project(ll, brg, d){
+  return [ll[0] + d*Math.cos(rad(brg))/111320, ll[1] + d*Math.sin(rad(brg))/(111320*Math.cos(rad(ll[0])))];
+}
+
+// ---------- tiles ----------
+const r6 = x => Math.round(x*1e6)/1e6;
+const ptKey = p => p[0] + "," + p[1];
+function cellOf(ll){
+  const n = 2**TZ, la = rad(ll[0]);
+  return [Math.floor((ll[1]+180)/360*n), Math.floor((1 - Math.log(Math.tan(la) + 1/Math.cos(la))/Math.PI)/2*n)];
+}
+const cellKey = c => c[0] + ":" + c[1];
+function tileLat(y){ const n = Math.PI - 2*Math.PI*y/2**TZ; return deg(Math.atan(0.5*(Math.exp(n) - Math.exp(-n)))); }
+function tileLon(x){ return x/2**TZ*360 - 180; }
+function cellCenter(k){ const [x,y] = k.split(":").map(Number); return [tileLat(y+.5), tileLon(x+.5)]; }
+
+// ---------- offline store (IndexedDB) ----------
+let dbP = null;
+function db(){
+  if (!dbP) dbP = new Promise((res, rej) => {
+    const r = indexedDB.open("streetwise-pursuit", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("tiles");
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  return dbP;
+}
+async function idbGet(k){
+  try { const d = await db();
+    return await new Promise(res => { const q = d.transaction("tiles").objectStore("tiles").get(k);
+      q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); });
+  } catch(e){ return null; }
+}
+async function idbPut(k, v){
+  try { const d = await db();
+    await new Promise(res => { const tx = d.transaction("tiles","readwrite"); tx.objectStore("tiles").put(v, k);
+      tx.oncomplete = res; tx.onerror = res; tx.onabort = res; });
+  } catch(e){}
+}
+async function idbCount(){
+  try { const d = await db();
+    return await new Promise(res => { const q = d.transaction("tiles").objectStore("tiles").count();
+      q.onsuccess = () => res(q.result); q.onerror = () => res(0); });
+  } catch(e){ return 0; }
+}
+const fresh = c => c && Date.now() - c.t < CACHE_DAYS*864e5;
+
+// ---------- data sources ----------
+const SKIP_CLASS = new Set(["path","track","ferry","rail","transit","bridleway","pier","aerialway","raceway"]);
+let tileTemplate = null;
+async function getTemplate(force){
+  if (tileTemplate && !force) return tileTemplate;
+  try { const c = JSON.parse(localStorage.getItem("swp_tpl") || "null");
+        if (!force && c && Date.now() - c.t < 864e5) return (tileTemplate = c.u); } catch(e){}
+  const r = await fetch("https://tiles.openfreemap.org/planet");
+  if (!r.ok) throw new Error("tile index HTTP " + r.status);
+  tileTemplate = (await r.json()).tiles[0];
+  try { localStorage.setItem("swp_tpl", JSON.stringify({ t:Date.now(), u:tileTemplate })); } catch(e){}
+  return tileTemplate;
+}
+function linesOf(f, x, y){
+  const g = f.toGeoJSON(x, y, TZ).geometry;
+  return (g.type === "LineString" ? [g.coordinates] : g.coordinates).map(ln => ln.map(c => [r6(c[1]), r6(c[0])]));
+}
+async function fetchTile(k, retry){
+  const [x,y] = k.split(":").map(Number);
+  const url = (await getTemplate(retry)).replace("{z}", TZ).replace("{x}", x).replace("{y}", y);
+  const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 12000);
+  const r = await fetch(url, { signal:ctl.signal }); clearTimeout(to);
+  if (r.status === 404 && !retry) return fetchTile(k, true);
+  const out = { ways:[], lanes:[] };
+  if (r.status === 204 || r.status === 404) return out;
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const t = decodeTile(new Uint8Array(await r.arrayBuffer()));
+  const N = t.layers.transportation_name;
+  if (N) for (let i=0; i<N.length; i++){
+    const f = N.feature(i), p = f.properties;
+    const name = p.name || p["name:latin"] || p.name_en;
+    if (!name || f.type !== 2 || SKIP_CLASS.has(p.class)) continue;
+    linesOf(f, x, y).forEach((pts, j) => out.ways.push({ id:"t"+k+"_"+i+"_"+j, name, pts }));
+  }
+  const T = t.layers.transportation;   // unnamed back lanes and ramps
+  if (T) for (let i=0; i<T.length; i++){
+    const f = T.feature(i), p = f.properties;
+    if (f.type !== 2) continue;
+    let kind = null;
+    if (p.class === "service" && p.service === "alley") kind = "lane";
+    else if (p.ramp == 1 && !SKIP_CLASS.has(p.class)) kind = "ramp";
+    if (!kind) continue;
+    linesOf(f, x, y).forEach((pts, j) => out.lanes.push({ id:"l"+k+"_"+i+"_"+j, kind, pts }));
+  }
+  return out;
+}
+async function fetchOverpass(k){
+  const [x,y] = k.split(":").map(Number), pad = 0.0008;
+  const bb = `${(tileLat(y+1)-pad).toFixed(4)},${(tileLon(x)-pad).toFixed(4)},${(tileLat(y)+pad).toFixed(4)},${(tileLon(x+1)+pad).toFixed(4)}`;
+  const HW = "motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|road|service|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link";
+  const q = `[out:json][timeout:12][maxsize:8000000];(way["highway"~"^(${HW})$"]["name"](${bb});way["highway"="service"]["service"="alley"](${bb});way["highway"~"_link$"][!"name"](${bb}););out geom qt;`;
+  const errors = [];
+  for (const url of OVERPASS){
+    try {
+      const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 15000);
+      const r = await fetch(url + "?data=" + encodeURIComponent(q), { signal:ctl.signal }); clearTimeout(to);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json(), out = { ways:[], lanes:[] };
+      for (const el of j.elements){
+        if (el.type !== "way" || !el.geometry) continue;
+        const pts = el.geometry.map(g => [r6(g.lat), r6(g.lon)]), tg = el.tags || {};
+        if (tg.name) out.ways.push({ id:el.id, name:tg.name, pts });
+        else out.lanes.push({ id:el.id, kind: tg.service === "alley" ? "lane" : "ramp", pts });
+      }
+      return out;
+    } catch(e){ errors.push(new URL(url).host.split(".")[0] + ": " + (e.name === "AbortError" ? "timeout" : e.message)); }
+  }
+  throw new Error(errors.join("; "));
+}
+async function fetchCell(k){
+  let first;
+  try { return await fetchTile(k); } catch(e){ first = "openfreemap: " + (e.name === "AbortError" ? "timeout" : e.message); }
+  try { return await fetchOverpass(k); } catch(e){ throw new Error(first + "; " + e.message); }
+}
+
+// ---------- loading around you ----------
+function neededCells(){
+  if (!pos) return [];
+  const pts = [pos];
+  for (const b of [0,90,180,270]) pts.push(project(pos, b, 400));
+  if (heading != null){
+    for (const d of [600, 1200, 2000, 3000]) pts.push(project(pos, heading, d));
+    for (const s of [-90, 90]) pts.push(project(project(pos, heading, 800), heading + s, 700));  // quick turns
+  }
+  const keys = [];
+  for (const p of pts){ const k = cellKey(cellOf(p)); if (!keys.includes(k)) keys.push(k); }
+  return keys;
+}
+async function pump(){
+  if (pumping) return; pumping = true;
+  try {
+    while (true){
+      const k = neededCells().find(k => { const c = cells.get(k);
+        return !c || (c.status === "fail" && Date.now() > c.retryAt); });
+      if (!k) break;
+      cells.set(k, { status:"loading" });
+      const cached = await idbGet(k);
+      if (fresh(cached)){ cells.set(k, { status:"ok", ...cached }); rebuild(); continue; }
+      setRoadMsg("Loading streets…");
+      try {
+        const d = await fetchCell(k);
+        cells.set(k, { status:"ok", ...d });
+        idbPut(k, { t:Date.now(), ways:d.ways, lanes:d.lanes });
+        rebuild();
+      } catch(e){
+        if (cached){ cells.set(k, { status:"ok", ...cached }); rebuild(); continue; }   // stale beats nothing
+        cells.set(k, { status:"fail", retryAt:Date.now() + 10000 });
+        setRoadMsg("Street data failed — retrying");
+        break;
+      }
+    }
+  } finally { pumping = false; }
+}
+setInterval(() => { if (pos) pump(); }, 3000);
+
+const GB_LAT = 0.001, GB_LON = 0.0015;
+function bucketsFor(a, b){
+  const i0 = Math.floor(Math.min(a[0],b[0])/GB_LAT), i1 = Math.floor(Math.max(a[0],b[0])/GB_LAT);
+  const j0 = Math.floor(Math.min(a[1],b[1])/GB_LON), j1 = Math.floor(Math.max(a[1],b[1])/GB_LON);
+  const out = [];
+  for (let i=i0; i<=i1; i++) for (let j=j0; j<=j1; j++) out.push(i + ":" + j);
+  return out;
+}
+function index(list){
+  const grid = new Map();
+  for (const w of list) for (let i=0; i<w.pts.length-1; i++)
+    for (const k of bucketsFor(w.pts[i], w.pts[i+1])){
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push([w, i]);
+    }
+  return grid;
+}
+function rebuild(){
+  for (const k of [...cells.keys()]) if (pos && dist(pos, cellCenter(k)) > KEEP_RADIUS) cells.delete(k);
+  const seen = new Set(), ways = [], lanes = [], nodeNames = new Map();
+  for (const c of cells.values()){
+    if (c.status !== "ok") continue;
+    for (const w of c.ways){
+      if (seen.has(w.id)) continue; seen.add(w.id); ways.push(w);
+      for (const p of w.pts){ const key = ptKey(p);
+        if (!nodeNames.has(key)) nodeNames.set(key, new Set()); nodeNames.get(key).add(w.name); }
+    }
+    for (const l of c.lanes || []) if (!seen.has(l.id)){ seen.add(l.id); lanes.push(l); }
+  }
+  roads = { ways, lanes, nodeNames, grid:index(ways), laneGrid:index(lanes) };
+  const ok = [...cells.values()].filter(c => c.status === "ok").length;
+  setRoadMsg(`${ok} areas ready`);
+  update();
+}
+
+// ---------- where am I ----------
+function nearby(grid, maxD){
+  const dLa = maxD/111320, dLo = maxD/(111320*Math.cos(rad(pos[0])));
+  const out = [], seen = new Set();
+  for (const k of bucketsFor([pos[0]-dLa, pos[1]-dLo], [pos[0]+dLa, pos[1]+dLo]))
+    for (const [w, i] of grid.get(k) || []){
+      const id = w.id + "/" + i; if (seen.has(id)) continue; seen.add(id);
+      const A = w.pts[i], B = w.pts[i+1];
+      const a = toXY(A[0],A[1],pos), b = toXY(B[0],B[1],pos), c = closest([0,0], a, b);
+      const d = Math.hypot(c[0], c[1]);
+      if (d <= maxD) out.push({ w, a, b, c, d, brg:bearing(A, B) });
+    }
+  return out;
+}
+const alignPenalty = brg => heading == null ? 0 : lineDiff(brg, heading)/90*20;
+
+function locate(){
+  const named = nearby(roads.grid, 200);
+  const lanes = nearby(roads.laneGrid, IN_LANE + 10);
+  const byName = new Map();
+  for (const s of named){
+    const sc = s.d + alignPenalty(s.brg), cur = byName.get(s.w.name);
+    if (!cur || sc < cur.sc) byName.set(s.w.name, { name:s.w.name, sc, d:s.d, seg:s });
+  }
+  let lane = null;
+  for (const s of lanes){ const sc = s.d + alignPenalty(s.brg); if (!lane || sc < lane.sc) lane = { sc, d:s.d, seg:s }; }
+  let top = [...byName.values()].sort((a, b) => a.sc - b.sc)[0];
+  // stick with the street already shown unless another clearly wins (stops flicker at intersections)
+  if (shown && shown.kind === "street" && top && top.name !== shown.name){
+    const cur = byName.get(shown.name);
+    if (cur && cur.d < 30 && cur.sc - top.sc < STICKY) top = cur;
+  }
+  if (lane && lane.d < IN_LANE && (!top || lane.sc < top.sc - 4)) return laneInfo(lane.seg, named);
+  if (top && top.d <= ON_STREET) return { kind:"street", name:top.name };
+  if (top) return { kind:"off", name:"Off road", sub:`near ${top.name} (${fmtDist(top.d)})`, exclude:new Set() };
+  return null;
+}
+function laneInfo(seg, named){
+  const dx = seg.b[0]-seg.a[0], dy = seg.b[1]-seg.a[1], L = Math.hypot(dx, dy) || 1, u = [dx/L, dy/L];
+  let left = null, right = null;
+  for (const s of named){
+    if (s.d > 130 || lineDiff(s.brg, seg.brg) > 25) continue;   // parallel streets on either side
+    const side = u[0]*s.c[1] - u[1]*s.c[0];
+    if (side > 0){ if (!left || s.d < left.d) left = s; } else { if (!right || s.d < right.d) right = s; }
+  }
+  const names = [left, right].filter(Boolean).map(s => s.w.name).filter((n, i, a) => a.indexOf(n) === i);
+  const isRamp = seg.w.kind === "ramp";
+  let sub = "";
+  if (isRamp){
+    const near = named.slice().sort((a, b) => a.d - b.d)[0];
+    sub = near ? `off ${near.w.name}` : "";
+  } else if (names.length === 2) sub = `between ${names[0]} & ${names[1]}`;
+  else if (names.length === 1) sub = `behind ${names[0]}`;
+  return { kind:isRamp ? "ramp" : "lane", name:isRamp ? "Ramp" : "Back lane", sub, exclude:new Set(names) };
+}
+
+// next cross street along the street you're on (connected or crossing, bridges included)
+function approachingOnStreet(name){
+  if (heading == null) return null;
+  const hits = [];
+  const consider = (d, ll, other) => {
+    if (d < 12 || d > LOOKAHEAD_MAX || other === name) return;
+    if (angDiff(bearing(pos, ll), heading) > AHEAD_ANGLE) return;
+    hits.push({ d, ll, name:other });
+  };
+  const checked = new Set();
+  for (const w of roads.ways){
+    if (w.name !== name) continue;
+    for (const p of w.pts){
+      const ns = roads.nodeNames.get(ptKey(p));
+      if (ns && ns.size > 1) for (const n of ns) consider(dist(pos, p), p, n);
+    }
+    for (let i=0; i<w.pts.length-1; i++){
+      const A = w.pts[i], B = w.pts[i+1];
+      if (Math.min(dist(pos, A), dist(pos, B)) > LOOKAHEAD_MAX + 1000) continue;
+      const a = toXY(A[0],A[1],pos), b = toXY(B[0],B[1],pos);
+      for (const k of bucketsFor(A, B)) for (const [o, j] of roads.grid.get(k) || []){
+        if (o.name === name) continue;
+        const id = w.id+"/"+i+"|"+o.id+"/"+j; if (checked.has(id)) continue; checked.add(id);
+        const C = o.pts[j], D = o.pts[j+1];
+        const x = segIntersect(a, b, toXY(C[0],C[1],pos), toXY(D[0],D[1],pos));
+        if (x) consider(Math.hypot(x[0], x[1]), toLL(x), o.name);
+      }
+    }
+  }
+  return pick(hits);
+}
+// next named street straight ahead (for lanes, ramps, parking lots)
+function approachingAhead(len, exclude){
+  if (heading == null) return null;
+  const end = project(pos, heading, len), e = toXY(end[0], end[1], pos), hits = [], seen = new Set();
+  for (const k of bucketsFor(pos, end)) for (const [w, i] of roads.grid.get(k) || []){
+    if (exclude.has(w.name)) continue;
+    const id = w.id+"/"+i; if (seen.has(id)) continue; seen.add(id);
+    const A = w.pts[i], B = w.pts[i+1];
+    const x = segIntersect([0,0], e, toXY(A[0],A[1],pos), toXY(B[0],B[1],pos));
+    if (x){ const d = Math.hypot(x[0], x[1]); if (d > 8) hits.push({ d, ll:toLL(x), name:w.name }); }
+  }
+  return pick(hits);
+}
+function pick(hits){
+  if (!hits.length) return null;
+  hits.sort((p, q) => p.d - q.d);
+  const best = hits[0];
+  return { d:best.d, ll:best.ll, names:[...new Set(hits.filter(h => h.d - best.d < 40).map(h => h.name))] };
+}
+
+// ---------- GPS + lag compensation ----------
+function onFix(p){
+  if (demo) return;
+  const c = p.coords, ll = [c.latitude, c.longitude], t = Date.now();
+  lastPts.push({ ll, t }); while (lastPts.length > 6) lastPts.shift();
+  let spd = (c.speed != null && !isNaN(c.speed) && c.speed >= 0) ? c.speed : null;
+  if (spd == null && lastPts.length >= 2){
+    const a = lastPts[lastPts.length-2], dt = (t - a.t)/1000; spd = dt > 0 ? dist(a.ll, ll)/dt : 0;
+  }
+  let hd = (c.heading != null && !isNaN(c.heading) && spd > 1.5) ? c.heading : null;
+  if (hd == null){ const first = lastPts.find(q => dist(q.ll, ll) > 8); hd = first ? bearing(first.ll, ll) : (fix ? fix.heading : null); }
+  fix = { ll, t, acc:c.accuracy, speed:spd || 0, heading:hd };
+  tick();
+}
+function tick(){
+  if (!fix || demo) return;
+  const age = (Date.now() - fix.t)/1000;
+  let p = fix.ll;
+  // GPS is ~1 s behind reality: push the estimate forward along your heading
+  if (fix.speed > 4 && fix.heading != null && age < 4)
+    p = project(fix.ll, fix.heading, fix.speed*Math.min(age + GPS_LATENCY, MAX_LEAD));
+  pos = p; heading = fix.heading; speedMs = age < 4 ? fix.speed : 0;
+  update();
+}
+setInterval(tick, 250);
+
+function gpsQuality(){
+  if (demo) return ["good", ""];
+  if (!fix) return ["bad", "No GPS yet"];
+  const age = (Date.now() - fix.t)/1000;
+  if (age > 5) return ["bad", `GPS LOST — last fix ${Math.round(age)} s ago`];
+  if (fix.acc > 50) return ["bad", `GPS POOR ±${Math.round(fix.acc)} m — don't trust`];
+  if (fix.acc > 20) return ["weak", `GPS weak ±${Math.round(fix.acc)} m — verify`];
+  return ["good", ""];
+}
+
+// ---------- render ----------
+const DIRS = ["N","NE","E","SE","S","SW","W","NW"];
+const WORDS = ["North","Northeast","East","Southeast","South","Southwest","West","Northwest"];
+function update(){
+  if (!pos) return;
+  const v = useMph ? speedMs*2.23694 : speedMs*3.6;
+  $("speed").textContent = Math.round(v < 1.5 ? 0 : v);
+  $("unit").textContent = useMph ? "mph" : "km/h";
+  if (heading != null){ const i = Math.round(heading/45) % 8; $("dir").textContent = DIRS[i]; $("dirWord").textContent = WORDS[i]; }
+  else { $("dir").textContent = "—"; $("dirWord").textContent = "Heading"; }
+
+  const [q, msg] = gpsQuality();
+  $("top").className = "card" + (q === "good" ? "" : " " + q);
+  $("warn").textContent = msg;
+  gpsMsg = fix ? `GPS ±${Math.round(fix.acc)} m` : (demo ? "Demo" : "");
+  renderStatus();
+
+  me.setLatLng(pos); if (!map.hasLayer(me)) me.addTo(map);
+  const svg = me.getElement() && me.getElement().querySelector("svg");
+  if (svg) svg.style.transform = `rotate(${heading ?? 0}deg)`;
+  if (follow) map.panTo(pos, { animate:false });
+  pump();
+
+  if (!roads.ways.length){
+    $("street").textContent = "—"; $("streetSub").textContent = "";
+    $("next").textContent = "Loading streets…"; $("nextDist").textContent = ""; return;
+  }
+  const where = locate(); shown = where;
+  if (!where){ $("street").textContent = "—"; $("streetSub").textContent = ""; }
+  else { $("street").textContent = where.name; $("streetSub").textContent = where.sub || ""; }
+
+  let nx = null;
+  if (where && where.kind === "street") nx = approachingOnStreet(where.name) || approachingAhead(LOOKAHEAD_MAX, new Set([where.name]));
+  else if (where) nx = approachingAhead(where.kind === "lane" ? 600 : 1000, where.exclude);
+  if (nx){
+    $("next").textContent = nx.names.join(" / ");
+    $("nextDist").textContent = fmtDist(nx.d);
+    nextMarker.setLatLng(nx.ll); if (!map.hasLayer(nextMarker)) nextMarker.addTo(map);
+  } else {
+    $("next").textContent = heading == null ? "Start moving…" : "—";
+    $("nextDist").textContent = "";
+    if (map.hasLayer(nextMarker)) map.removeLayer(nextMarker);
+  }
+}
+function fmtDist(m){
+  if (useMph){ const ft = m*3.28084; return ft < 1000 ? `${Math.round(ft/10)*10} ft` : `${(m/1609.34).toFixed(1)} mi`; }
+  return m < 1000 ? `${Math.round(m/10)*10} m` : `${(m/1000).toFixed(1)} km`;
+}
+function setRoadMsg(t){ roadMsg = t; renderStatus(); }
+function renderStatus(){ $("status").textContent = [gpsMsg, roadMsg].filter(Boolean).join(" · "); }
+
+// ---------- offline download ----------
+async function showOffline(){
+  const n = await idbCount(), a = cellOf([WPG.n, WPG.w]), b = cellOf([WPG.s, WPG.e]);
+  const total = (b[0]-a[0]+1)*(b[1]-a[1]+1);
+  $("offline").textContent = n ? `${Math.min(n, total)} of ${total} Winnipeg areas saved on this phone` : "Nothing saved offline yet";
+}
+async function downloadWinnipeg(){
+  const btn = $("dl"); btn.disabled = true;
+  const a = cellOf([WPG.n, WPG.w]), b = cellOf([WPG.s, WPG.e]), queue = [];
+  for (let x=a[0]; x<=b[0]; x++) for (let y=a[1]; y<=b[1]; y++) queue.push(x + ":" + y);
+  const total = queue.length; let done = 0, failed = 0;
+  const show = () => btn.textContent = `Downloading… ${done}/${total}` + (failed ? ` (${failed} failed)` : "");
+  show();
+  async function worker(){
+    while (queue.length){
+      const k = queue.shift();
+      if (!fresh(await idbGet(k))){
+        try { const d = await fetchTile(k); await idbPut(k, { t:Date.now(), ways:d.ways, lanes:d.lanes }); }
+        catch(e){ failed++; }
+      }
+      done++; show();
+    }
+  }
+  await Promise.all(Array.from({ length:6 }, worker));
+  btn.textContent = failed ? `Done — ${failed} failed, tap to retry` : "Winnipeg saved ✓ (tap to refresh)";
+  btn.disabled = false;
+  showOffline();
+}
+
+// ---------- start / controls ----------
+async function keepAwake(){ try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch(e) {} }
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !demo) keepAwake(); });
+function onErr(e){ $("warn").textContent = e.code === 1 ? "Location permission denied — enable it in settings" : "GPS error: " + e.message; $("top").className = "card bad"; }
+function start(){
+  $("start").style.display = "none";
+  if (!("geolocation" in navigator)){ onErr({ message:"not available" }); return; }
+  navigator.geolocation.watchPosition(onFix, onErr, { enableHighAccuracy:true, maximumAge:0, timeout:10000 });
+  keepAwake(); map.setZoom(17);
+}
+function setDemo(on){
+  demo = on; $("demoBtn").classList.toggle("on", on); $("demoBtn").textContent = on ? "Demo on" : "Demo";
+  if (on){ speedMs = 0; roadMsg = "Demo: tap the map to move"; renderStatus(); }
+}
+map.on("click", e => {
+  if (!demo) return;
+  const ll = [e.latlng.lat, e.latlng.lng];
+  if (pos && dist(pos, ll) > 3){ heading = bearing(pos, ll); speedMs = 13.9; }
+  pos = ll; follow = false; update();
+});
+$("go").onclick = start;
+$("dl").onclick = downloadWinnipeg;
+$("goDemo").onclick = () => { $("start").style.display = "none"; setDemo(true); const c = map.getCenter(); pos = [c.lat, c.lng]; update(); };
+$("demoBtn").onclick = () => setDemo(!demo);
+$("speedBox").onclick = () => { useMph = !useMph; try { localStorage.setItem("swp_mph", useMph ? "1" : "0"); } catch(e){} update(); };
+$("recenter").onclick = () => { follow = true; $("recenter").style.display = "none"; if (pos) map.setView(pos, Math.max(map.getZoom(), 16)); };
+showOffline();
+</script>
+</body>
+</html>
