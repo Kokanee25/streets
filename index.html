@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f1115">
+<title>Streetwise</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --bg:#0f1115; --card:rgba(18,21,28,.92); --fg:#f2f4f8; --dim:#9aa3b2; --accent:#ffb020; --ok:#3ddc84; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+  #map { position:absolute; inset:0; }
+  .card { position:absolute; left:12px; right:12px; z-index:1000; background:var(--card);
+    border-radius:16px; padding:12px 16px; box-shadow:0 6px 24px rgba(0,0,0,.4); backdrop-filter:blur(6px); }
+  #top { top:calc(12px + env(safe-area-inset-top)); }
+  #bottom { bottom:calc(12px + env(safe-area-inset-bottom)); display:flex; gap:14px; align-items:center; }
+  .label { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
+  #street { font-size:28px; font-weight:700; line-height:1.15; margin-top:2px; }
+  #speedBox { text-align:center; min-width:96px; border-right:1px solid #2a2f3a; padding-right:14px; cursor:pointer; }
+  #speed { font-size:48px; font-weight:800; line-height:1; font-variant-numeric:tabular-nums; }
+  #unit { font-size:13px; color:var(--dim); }
+  #nextBox { flex:1; min-width:0; }
+  #next { font-size:22px; font-weight:700; color:var(--accent); line-height:1.2; }
+  #nextDist { font-size:15px; color:var(--dim); margin-top:2px; font-variant-numeric:tabular-nums; }
+  #status { font-size:12px; color:var(--dim); margin-top:4px; }
+  .btn { position:absolute; z-index:1000; right:12px; background:var(--card); color:var(--fg); border:0;
+    border-radius:12px; padding:10px 12px; font-size:14px; font-weight:600; }
+  #recenter { top:calc(110px + env(safe-area-inset-top)); display:none; }
+  #demoBtn { top:calc(160px + env(safe-area-inset-top)); }
+  #demoBtn.on { background:var(--accent); color:#111; }
+  #start { position:absolute; inset:0; z-index:2000; background:var(--bg); display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:16px; padding:24px; text-align:center; }
+  #start h1 { margin:0; font-size:34px; }
+  #start p { margin:0; color:var(--dim); max-width:340px; line-height:1.4; }
+  #start button { background:var(--accent); color:#111; border:0; border-radius:14px; padding:16px 28px;
+    font-size:18px; font-weight:700; }
+  #start .ghost { background:transparent; color:var(--dim); border:1px solid #2a2f3a; font-size:15px; padding:10px 18px; }
+  .arrow { width:28px; height:28px; }
+  .arrow svg { width:28px; height:28px; transition:transform .3s; filter:drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="top" class="card">
+  <div class="label">You're on</div>
+  <div id="street">—</div>
+  <div id="status">Waiting for GPS…</div>
+</div>
+
+<div id="bottom" class="card">
+  <div id="speedBox" title="Tap to switch units">
+    <div id="speed">0</div>
+    <div id="unit">km/h</div>
+  </div>
+  <div id="nextBox">
+    <div class="label">Approaching</div>
+    <div id="next">—</div>
+    <div id="nextDist"></div>
+  </div>
+</div>
+
+<button id="recenter" class="btn">◎ Follow</button>
+<button id="demoBtn" class="btn">Demo</button>
+
+<div id="start">
+  <h1>Streetwise</h1>
+  <p>Shows the street you're on, your speed, and the next cross street ahead. Uses your phone's GPS and OpenStreetMap.</p>
+  <button id="go">Start</button>
+  <button id="goDemo" class="ghost">Try demo (tap the map to drive)</button>
+</div>
+
+<script>
+// ---------- settings ----------
+const FETCH_RADIUS = 700;      // m of road data to load around you
+const REFETCH_AFTER = 300;     // m moved from last load before reloading
+const LOOKAHEAD_MAX = 1500;    // m max distance to report a cross street
+const AHEAD_ANGLE = 55;        // deg either side of heading counts as "ahead"
+const OVERPASS = ["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+
+// ---------- state ----------
+let useMph = false;
+try { useMph = localStorage.getItem("sw_mph") === "1"; } catch(e) {}
+let follow = true, demo = false;
+let pos = null, heading = null, speedMs = 0;
+let lastPts = [];              // recent fixes for computed heading/speed
+let roads = { nodes:new Map(), ways:[] };
+let loadedAt = null, loading = false;
+let wakeLock = null;
+
+// ---------- map ----------
+const map = L.map("map", { zoomControl:false, attributionControl:true }).setView([49.8951,-97.1384], 16);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom:19, attribution:'&copy; OpenStreetMap contributors'
+}).addTo(map);
+const arrowIcon = L.divIcon({ className:"arrow", iconSize:[28,28], iconAnchor:[14,14],
+  html:'<svg viewBox="0 0 28 28"><circle cx="14" cy="14" r="12" fill="#2b7cff" stroke="#fff" stroke-width="2.5"/><path d="M14 6 L19.5 19 L14 16 L8.5 19 Z" fill="#fff"/></svg>' });
+const me = L.marker([0,0], { icon:arrowIcon, interactive:false });
+const nextMarker = L.circleMarker([0,0], { radius:8, color:"#ffb020", weight:3, fillOpacity:.3 });
+const streetLine = L.polyline([], { color:"#3ddc84", weight:6, opacity:.55 });
+map.on("dragstart", () => { follow = false; $("recenter").style.display = "block"; });
+
+function $(id){ return document.getElementById(id); }
+
+// ---------- geometry (local metres) ----------
+const R = 6371000, rad = d => d*Math.PI/180, deg = r => r*180/Math.PI;
+function toXY(lat, lon, o){ return [rad(lon-o[1])*R*Math.cos(rad(o[0])), rad(lat-o[0])*R]; }
+function dist(a, b){ const p = toXY(b[0],b[1],a); return Math.hypot(p[0],p[1]); }
+function bearing(a, b){
+  const y = Math.sin(rad(b[1]-a[1]))*Math.cos(rad(b[0]));
+  const x = Math.cos(rad(a[0]))*Math.sin(rad(b[0])) - Math.sin(rad(a[0]))*Math.cos(rad(b[0]))*Math.cos(rad(b[1]-a[1]));
+  return (deg(Math.atan2(y,x))+360)%360;
+}
+function angDiff(a, b){ let d = Math.abs(a-b)%360; return d>180 ? 360-d : d; }
+function segDist(p, a, b){ // p,a,b in xy
+  const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
+  let t = L2 ? ((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L2 : 0; t = Math.max(0,Math.min(1,t));
+  return Math.hypot(p[0]-a[0]-t*dx, p[1]-a[1]-t*dy);
+}
+
+// ---------- road data ----------
+async function loadRoads(center){
+  if (loading) return; loading = true;
+  setStatus("Loading streets…");
+  const q = `[out:json][timeout:20];way(around:${FETCH_RADIUS},${center[0]},${center[1]})["highway"]["name"]["highway"!~"footway|cycleway|path|steps|bridleway|corridor|platform|proposed|construction"];(._;>;);out body qt;`;
+  for (const url of OVERPASS){
+    try {
+      const r = await fetch(url, { method:"POST", body:"data="+encodeURIComponent(q),
+        headers:{ "Content-Type":"application/x-www-form-urlencoded" } });
+      if (!r.ok) throw new Error(r.status);
+      const j = await r.json();
+      const nodes = new Map(), ways = [];
+      for (const el of j.elements){
+        if (el.type === "node") nodes.set(el.id, [el.lat, el.lon]);
+      }
+      for (const el of j.elements){
+        if (el.type === "way" && el.tags && el.tags.name)
+          ways.push({ id:el.id, name:el.tags.name, ref:el.tags.ref, nodes:el.nodes, hw:el.tags.highway, oneway:el.tags.oneway });
+      }
+      // index: node id -> set of street names that use it
+      const nodeNames = new Map();
+      for (const w of ways) for (const n of w.nodes){
+        if (!nodeNames.has(n)) nodeNames.set(n, new Set());
+        nodeNames.get(n).add(w.name);
+      }
+      roads = { nodes, ways, nodeNames };
+      loadedAt = center; loading = false;
+      setStatus(`${ways.length} street segments loaded`);
+      update();
+      return;
+    } catch(e){ /* try next endpoint */ }
+  }
+  loading = false;
+  setStatus("Couldn't load street data — retrying soon");
+  setTimeout(() => { loadedAt = null; }, 10000);
+}
+
+// ---------- core logic ----------
+function currentStreet(){
+  if (!pos || !roads.ways.length) return null;
+  const p = [0,0];
+  let best = null;
+  for (const w of roads.ways){
+    for (let i=0; i<w.nodes.length-1; i++){
+      const A = roads.nodes.get(w.nodes[i]), B = roads.nodes.get(w.nodes[i+1]);
+      if (!A || !B) continue;
+      const d = segDist(p, toXY(A[0],A[1],pos), toXY(B[0],B[1],pos));
+      if (d > 60) continue;
+      let score = d;
+      if (heading != null){
+        // prefer segments running the way you're travelling (either direction)
+        const sb = bearing(A,B), diff = Math.min(angDiff(sb,heading), angDiff((sb+180)%360,heading));
+        score += (diff/90)*20;
+      }
+      if (!best || score < best.score) best = { score, d, way:w };
+    }
+  }
+  return best;
+}
+
+function approaching(name){
+  if (!pos || heading == null || !name) return null;
+  const ids = new Set();
+  for (const w of roads.ways) if (w.name === name) for (const n of w.nodes) ids.add(n);
+  let best = null;
+  for (const id of ids){
+    const names = roads.nodeNames.get(id);
+    if (!names || names.size < 2) continue;
+    const others = [...names].filter(n => n !== name);
+    if (!others.length) continue;
+    const ll = roads.nodes.get(id); if (!ll) continue;
+    const d = dist(pos, ll);
+    if (d < 12 || d > LOOKAHEAD_MAX) continue;
+    if (angDiff(bearing(pos, ll), heading) > AHEAD_ANGLE) continue;
+    if (!best || d < best.d) best = { d, ll, names:others };
+  }
+  return best;
+}
+
+function streetGeometry(name){
+  const lines = [];
+  for (const w of roads.ways) if (w.name === name)
+    lines.push(w.nodes.map(n => roads.nodes.get(n)).filter(Boolean));
+  return lines;
+}
+
+let lastName = null;
+function update(){
+  if (!pos) return;
+  // speed
+  const v = useMph ? speedMs*2.23694 : speedMs*3.6;
+  $("speed").textContent = Math.round(v < 1.5 ? 0 : v);
+  $("unit").textContent = useMph ? "mph" : "km/h";
+
+  // marker + map
+  me.setLatLng(pos); if (!map.hasLayer(me)) me.addTo(map);
+  const svg = me.getElement() && me.getElement().querySelector("svg");
+  if (svg) svg.style.transform = `rotate(${heading ?? 0}deg)`;
+  if (follow) map.panTo(pos, { animate:true });
+
+  // fetch roads if needed
+  if (!loadedAt || dist(loadedAt, pos) > REFETCH_AFTER) loadRoads(pos);
+
+  const cur = currentStreet();
+  if (cur){
+    const name = cur.way.name;
+    $("street").textContent = name;
+    if (name !== lastName){
+      streetLine.setLatLngs(streetGeometry(name)); if (!map.hasLayer(streetLine)) streetLine.addTo(map);
+      lastName = name;
+    }
+    const nx = approaching(name);
+    if (nx){
+      $("next").textContent = nx.names.join(" / ");
+      $("nextDist").textContent = fmtDist(nx.d);
+      nextMarker.setLatLng(nx.ll); if (!map.hasLayer(nextMarker)) nextMarker.addTo(map);
+    } else {
+      $("next").textContent = heading == null ? "Start moving…" : "—";
+      $("nextDist").textContent = "";
+      if (map.hasLayer(nextMarker)) map.removeLayer(nextMarker);
+    }
+  } else if (roads.ways.length){
+    $("street").textContent = "Off road";
+    $("next").textContent = "—"; $("nextDist").textContent = "";
+  }
+}
+
+function fmtDist(m){
+  if (useMph){ const ft = m*3.28084; return ft < 1000 ? `${Math.round(ft/10)*10} ft` : `${(m/1609.34).toFixed(1)} mi`; }
+  return m < 1000 ? `${Math.round(m/10)*10} m` : `${(m/1000).toFixed(1)} km`;
+}
+function setStatus(t){ $("status").textContent = t; }
+
+// ---------- GPS ----------
+function onFix(p){
+  if (demo) return;
+  const c = p.coords, here = [c.latitude, c.longitude], t = p.timestamp;
+  lastPts.push({ ll:here, t }); while (lastPts.length > 6) lastPts.shift();
+  // speed: device value if present, else derived
+  if (c.speed != null && !isNaN(c.speed)) speedMs = c.speed;
+  else if (lastPts.length >= 2){
+    const a = lastPts[lastPts.length-2], dt = (t-a.t)/1000;
+    if (dt > 0) speedMs = dist(a.ll, here)/dt;
+  }
+  // heading: device value when moving, else from recent movement
+  if (c.heading != null && !isNaN(c.heading) && speedMs > 1) heading = c.heading;
+  else {
+    const first = lastPts.find(q => dist(q.ll, here) > 8);
+    if (first) heading = bearing(first.ll, here);
+  }
+  pos = here;
+  setStatus(`GPS ±${Math.round(c.accuracy)} m`);
+  update();
+}
+function onErr(e){
+  setStatus(e.code === 1 ? "Location permission denied — enable it in browser settings"
+    : "GPS unavailable: " + e.message);
+}
+
+async function keepAwake(){
+  try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch(e) {}
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !demo) keepAwake(); });
+
+function start(){
+  $("start").style.display = "none";
+  if (!("geolocation" in navigator)){ setStatus("This browser has no GPS access"); return; }
+  if (!window.isSecureContext) setStatus("Needs https:// to use GPS");
+  navigator.geolocation.watchPosition(onFix, onErr, { enableHighAccuracy:true, maximumAge:0, timeout:15000 });
+  keepAwake();
+  map.setZoom(17);
+}
+
+// ---------- demo mode: tap the map to "drive" ----------
+function setDemo(on){
+  demo = on;
+  $("demoBtn").classList.toggle("on", on);
+  $("demoBtn").textContent = on ? "Demo on" : "Demo";
+  if (on){ setStatus("Demo: tap the map to move along a street"); speedMs = 0; }
+}
+map.on("click", e => {
+  if (!demo) return;
+  const ll = [e.latlng.lat, e.latlng.lng];
+  if (pos && dist(pos, ll) > 3){ heading = bearing(pos, ll); speedMs = 13.9; }
+  pos = ll; follow = false;
+  update();
+});
+
+// ---------- controls ----------
+$("go").onclick = start;
+$("goDemo").onclick = () => { $("start").style.display = "none"; setDemo(true);
+  pos = map.getCenter(); pos = [pos.lat, pos.lng]; update(); };
+$("demoBtn").onclick = () => setDemo(!demo);
+$("speedBox").onclick = () => { useMph = !useMph; try { localStorage.setItem("sw_mph", useMph?"1":"0"); } catch(e){} update(); };
+$("recenter").onclick = () => { follow = true; $("recenter").style.display = "none"; if (pos) map.setView(pos, Math.max(map.getZoom(),16)); };
+</script>
+</body>
+</html>
