@@ -81,7 +81,7 @@
 <button id="demoBtn" class="btn">Demo</button>
 
 <div id="start">
-  <h1>Streetwise <span style="font-size:14px;color:var(--dim)">v4</span></h1>
+  <h1>Streetwise <span style="font-size:14px;color:var(--dim)">v5</span></h1>
   <p>Shows the street you're on, your speed, and the next cross street ahead. Uses your phone's GPS and OpenStreetMap.</p>
   <button id="go">Start</button>
   <button id="goDemo" class="ghost">Try demo (tap the map to drive)</button>
@@ -89,7 +89,7 @@
 
 <script>
 // ---------- settings ----------
-const VERSION = "v4";
+const VERSION = "v5";
 const CELL_LAT = 0.01, CELL_LON = 0.015;   // street data is loaded in ~1 km squares
 const KEEP_RADIUS = 4000;                  // m: drop squares from memory beyond this
 const CACHE_DAYS = 30;                     // squares are saved on the phone this long
@@ -108,7 +108,7 @@ try { useMph = localStorage.getItem("sw_mph") === "1"; } catch(e) {}
 let follow = true, demo = false;
 let pos = null, heading = null, speedMs = 0;
 let lastPts = [];              // recent fixes for computed heading/speed
-let roads = { ways:[], nodeNames:new Map() };
+let roads = { ways:[], nodeNames:new Map(), grid:new Map() };
 const cells = new Map();   // key -> {status, ways, retryAt}
 let pumping = false;
 let roadMsg = "", gpsMsg = "";
@@ -246,7 +246,16 @@ function rebuild(){
       }
     }
   }
-  roads = { ways, nodeNames };
+  // spatial index of every road segment, for finding crossings (incl. overpasses)
+  const grid = new Map();
+  for (const w of ways) for (let i=0; i<w.pts.length-1; i++){
+    const a = w.pts[i], b = w.pts[i+1];
+    for (const k of bucketsFor(a, b)){
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push([w, i]);
+    }
+  }
+  roads = { ways, nodeNames, grid };
   lastName = null;
   const ok = [...cells.values()].filter(c => c.status === "ok").length;
   setRoadMsg(`${ok} area${ok === 1 ? "" : "s"} of streets ready`);
@@ -287,21 +296,63 @@ function currentStreet(){
   return best;
 }
 
+const GB_LAT = 0.001, GB_LON = 0.0015;   // ~110 m buckets
+function bucketsFor(a, b){
+  const i0 = Math.floor(Math.min(a[0],b[0])/GB_LAT), i1 = Math.floor(Math.max(a[0],b[0])/GB_LAT);
+  const j0 = Math.floor(Math.min(a[1],b[1])/GB_LON), j1 = Math.floor(Math.max(a[1],b[1])/GB_LON);
+  const out = [];
+  for (let i=i0; i<=i1; i++) for (let j=j0; j<=j1; j++) out.push(i + ":" + j);
+  return out;
+}
+function segIntersect(p1, p2, p3, p4){ // xy points; returns intersection xy or null
+  const d = (p2[0]-p1[0])*(p4[1]-p3[1]) - (p2[1]-p1[1])*(p4[0]-p3[0]);
+  if (Math.abs(d) < 1e-9) return null;
+  const t = ((p3[0]-p1[0])*(p4[1]-p3[1]) - (p3[1]-p1[1])*(p4[0]-p3[0])) / d;
+  const u = ((p3[0]-p1[0])*(p2[1]-p1[1]) - (p3[1]-p1[1])*(p2[0]-p1[0])) / d;
+  const e = 1e-6;
+  if (t < -e || t > 1+e || u < -e || u > 1+e) return null;
+  return [p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1])];
+}
+
 function approaching(name){
   if (!pos || heading == null || !name) return null;
-  let best = null;
+  const hits = [];   // {d, ll, name}
+  const consider = (d, ll, other) => {
+    if (d < 12 || d > LOOKAHEAD_MAX || other === name) return;
+    if (angDiff(bearing(pos, ll), heading) > AHEAD_ANGLE) return;
+    hits.push({ d, ll, name:other });
+  };
+  const toLL = xy => [pos[0] + deg(xy[1]/R), pos[1] + deg(xy[0]/(R*Math.cos(rad(pos[0]))))];
+  const checked = new Set();
   for (const w of roads.ways){
     if (w.name !== name) continue;
+    // 1) streets that connect to yours
     for (const p of w.pts){
       const names = roads.nodeNames.get(ptKey(p));
-      if (!names || names.size < 2) continue;
-      const d = dist(pos, p);
-      if (d < 12 || d > LOOKAHEAD_MAX) continue;
-      if (angDiff(bearing(pos, p), heading) > AHEAD_ANGLE) continue;
-      if (!best || d < best.d) best = { d, ll:p, names:[...names].filter(n => n !== name) };
+      if (names && names.size > 1) for (const n of names) consider(dist(pos, p), p, n);
+    }
+    // 2) any named road crossing your path (bridges / underpasses too)
+    for (let i=0; i<w.pts.length-1; i++){
+      const A = w.pts[i], B = w.pts[i+1];
+      if (Math.min(dist(pos, A), dist(pos, B)) > LOOKAHEAD_MAX + 1000) continue;
+      const a = toXY(A[0],A[1],pos), b = toXY(B[0],B[1],pos);
+      for (const k of bucketsFor(A, B)){
+        for (const [o, j] of roads.grid.get(k) || []){
+          if (o.name === name) continue;
+          const id = w.id + "/" + i + "|" + o.id + "/" + j;
+          if (checked.has(id)) continue; checked.add(id);
+          const C = o.pts[j], D = o.pts[j+1];
+          const x = segIntersect(a, b, toXY(C[0],C[1],pos), toXY(D[0],D[1],pos));
+          if (x) consider(Math.hypot(x[0], x[1]), toLL(x), o.name);
+        }
+      }
     }
   }
-  return best;
+  if (!hits.length) return null;
+  hits.sort((p, q) => p.d - q.d);
+  const best = hits[0];
+  const names = [...new Set(hits.filter(h => h.d - best.d < 40).map(h => h.name))];
+  return { d:best.d, ll:best.ll, names };
 }
 
 function streetGeometry(name){
