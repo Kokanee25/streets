@@ -28,6 +28,12 @@
   #next { font-size:30px; font-weight:700; line-height:1.15; margin-top:2px; color:var(--accent); }
   #nextDist { font-size:17px; color:var(--dim); margin-top:2px; font-variant-numeric:tabular-nums; }
   #status { font-size:12px; color:var(--dim); margin-top:8px; }
+  #streetSub { font-size:20px; font-weight:700; color:#cfd5e0; margin-top:2px; }
+  #streetSub:empty { display:none; }
+  .btn.left { left:12px; right:auto; }
+  #nightBtn { bottom:calc(20px + env(safe-area-inset-bottom)); }
+  body.night .leaflet-tile-pane { filter:invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); }
+  body.night .leaflet-container { background:#1b1d22; }
   .btn { position:absolute; z-index:1000; right:12px; background:var(--card); color:var(--fg); border:0;
     border-radius:12px; padding:10px 12px; font-size:14px; font-weight:600; }
   #recenter { bottom:calc(70px + env(safe-area-inset-bottom)); display:none; }
@@ -56,6 +62,7 @@
   <div class="section">
     <div class="label">You're on</div>
     <div id="street">—</div>
+    <div id="streetSub"></div>
   </div>
   <div class="section">
     <div class="label">Approaching</div>
@@ -67,9 +74,10 @@
 
 <button id="recenter" class="btn">◎ Follow</button>
 <button id="demoBtn" class="btn">Demo</button>
+<button id="nightBtn" class="btn left">🌙 Night</button>
 
 <div id="start">
-  <h1>Streetwise <span style="font-size:14px;color:var(--dim)">v8</span></h1>
+  <h1>Streetwise <span style="font-size:14px;color:var(--dim)">v9</span></h1>
   <p>Shows the street you're on, your speed, and the next cross street ahead. Uses your phone's GPS and OpenStreetMap.</p>
   <button id="go">Start</button>
   <button id="goDemo" class="ghost">Try demo (tap the map to drive)</button>
@@ -80,7 +88,7 @@
 </script>
 <script>
 // ---------- settings ----------
-const VERSION = "v8";
+const VERSION = "v9";
 const TZ = 14;                             // street data is loaded in zoom-14 tiles (~1.5 km squares)
 const KEEP_RADIUS = 4000;                  // m: drop squares from memory beyond this
 const CACHE_DAYS = 30;                     // squares are saved on the phone this long
@@ -99,7 +107,7 @@ try { useMph = localStorage.getItem("sw_mph") === "1"; } catch(e) {}
 let follow = true, demo = false;
 let pos = null, heading = null, speedMs = 0;
 let lastPts = [];              // recent fixes for computed heading/speed
-let roads = { ways:[], nodeNames:new Map(), grid:new Map() };
+let roads = { ways:[], nodeNames:new Map(), grid:new Map(), addrGrid:new Map() };
 const cells = new Map();   // key -> {status, ways, retryAt}
 let pumping = false;
 let roadMsg = "", gpsMsg = "";
@@ -157,21 +165,31 @@ function project(ll, brg, d){
   return [ll[0] + d*Math.cos(rad(brg))/111320, ll[1] + d*Math.sin(rad(brg))/(111320*Math.cos(rad(ll[0])))];
 }
 
-function cacheGet(k){
-  try {
-    const raw = localStorage.getItem("sw2_" + k); if (!raw) return null;
-    const o = JSON.parse(raw);
-    if (Date.now() - o.t > CACHE_DAYS*864e5) return null;
-    return o.w;
+// Saved street data lives in IndexedDB (room for a whole city, unlike localStorage)
+let dbP = null;
+function db(){
+  if (!dbP) dbP = new Promise((res, rej) => {
+    const r = indexedDB.open("streetwise", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("tiles");
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  return dbP;
+}
+async function cacheGet(k){
+  try { const d = await db();
+    const v = await new Promise(res => { const q = d.transaction("tiles").objectStore("tiles").get(k);
+      q.onsuccess = () => res(q.result || null); q.onerror = () => res(null); });
+    return v && Date.now() - v.t < CACHE_DAYS*864e5 ? v : null;
   } catch(e){ return null; }
 }
-function cachePut(k, ways){
-  try { localStorage.setItem("sw2_" + k, JSON.stringify({ t:Date.now(), w:ways })); }
-  catch(e){ // storage full: clear old squares and try once more
-    try { Object.keys(localStorage).filter(x => (x.startsWith("sw2_") || x.startsWith("sw_cell_"))).forEach(x => localStorage.removeItem(x));
-          localStorage.setItem("sw2_" + k, JSON.stringify({ t:Date.now(), w:ways })); } catch(e2){}
-  }
+async function cachePut(k, data){
+  try { const d = await db();
+    await new Promise(res => { const tx = d.transaction("tiles","readwrite");
+      tx.objectStore("tiles").put({ t:Date.now(), ...data }, k); tx.oncomplete = res; tx.onerror = res; tx.onabort = res; });
+  } catch(e){}
 }
+// free the space used by the old cache format
+try { Object.keys(localStorage).filter(x => x.startsWith("sw2_") || x.startsWith("sw_cell_")).forEach(x => localStorage.removeItem(x)); } catch(e){}
 
 // Main source: OpenFreeMap vector tiles (fast CDN, no key). Backup: Overpass servers.
 const SKIP_CLASS = new Set(["path","track","ferry","rail","transit","bridleway","pier","aerialway","raceway"]);
@@ -192,11 +210,20 @@ async function fetchTile(k, retry){
   const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 12000);
   const r = await fetch(url, { signal:ctl.signal }); clearTimeout(to);
   if (r.status === 404 && !retry) return fetchTile(k, true);   // map version rotated
-  if (r.status === 204 || r.status === 404) return [];          // empty area
+  const ways = [], addrs = [];
+  if (r.status === 204 || r.status === 404) return { ways, addrs };   // empty area
   if (!r.ok) throw new Error("HTTP " + r.status);
   const t = decodeTile(new Uint8Array(await r.arrayBuffer()));
-  const L = t.layers.transportation_name, ways = [];
-  if (!L) return ways;
+  const H = t.layers.housenumber;          // address points, for block numbers
+  if (H) for (let i=0; i<H.length; i++){
+    const f = H.feature(i), n = parseInt(f.properties.housenumber, 10);
+    if (f.type !== 1 || !(n > 0)) continue;
+    const g = f.toGeoJSON(x, y, TZ).geometry;
+    const c = g.type === "Point" ? g.coordinates : g.coordinates[0];
+    addrs.push([r6(c[1]), r6(c[0]), n]);
+  }
+  const L = t.layers.transportation_name;
+  if (!L) return { ways, addrs };
   for (let i=0; i<L.length; i++){
     const f = L.feature(i), p = f.properties;
     const name = p.name || p["name:latin"] || p.name_en;
@@ -206,7 +233,7 @@ async function fetchTile(k, retry){
     lines.forEach((ln, j) => ways.push({ id:"t" + k + "_" + i + "_" + j, name,
       pts:ln.map(c => [r6(c[1]), r6(c[0])]) }));
   }
-  return ways;
+  return { ways, addrs };
 }
 
 async function fetchOverpass(k){
@@ -227,7 +254,7 @@ async function fetchOverpass(k){
       for (const el of j.elements)
         if (el.type === "way" && el.geometry && el.tags && el.tags.name)
           ways.push({ id:el.id, name:el.tags.name, pts:el.geometry.map(g => [r6(g.lat), r6(g.lon)]) });
-      return ways;
+      return { ways, addrs:[] };
     } catch(e){ errors.push(host + ": " + (e.name === "AbortError" ? "timeout" : e.message)); }
   }
   throw new Error(errors.join("; "));
@@ -258,14 +285,14 @@ async function pump(){
       const k = neededCells().find(k => { const c = cells.get(k);
         return !c || (c.status === "fail" && Date.now() > c.retryAt); });
       if (!k) break;
-      const cached = cacheGet(k);
-      if (cached){ cells.set(k, { status:"ok", ways:cached }); rebuild(); continue; }
       cells.set(k, { status:"loading" });
+      const cached = await cacheGet(k);
+      if (cached){ cells.set(k, { status:"ok", ways:cached.ways, addrs:cached.addrs || [] }); rebuild(); continue; }
       setRoadMsg("Loading streets…");
       try {
-        const ways = await fetchCell(k);
-        cells.set(k, { status:"ok", ways });
-        cachePut(k, ways);
+        const d = await fetchCell(k);
+        cells.set(k, { status:"ok", ways:d.ways, addrs:d.addrs });
+        cachePut(k, d);
         rebuild();
       } catch(e){
         cells.set(k, { status:"fail", retryAt:Date.now() + 15000 });
@@ -300,7 +327,13 @@ function rebuild(){
       grid.get(k).push([w, i]);
     }
   }
-  roads = { ways, nodeNames, grid };
+  const addrGrid = new Map();
+  for (const c of cells.values()) if (c.status === "ok") for (const a of c.addrs || []){
+    const k = Math.floor(a[0]/GB_LAT) + ":" + Math.floor(a[1]/GB_LON);
+    if (!addrGrid.has(k)) addrGrid.set(k, []);
+    addrGrid.get(k).push(a);
+  }
+  roads = { ways, nodeNames, grid, addrGrid };
   lastName = null;
   const ok = [...cells.values()].filter(c => c.status === "ok").length;
   setRoadMsg(`${ok} area${ok === 1 ? "" : "s"} of streets ready`);
@@ -407,6 +440,43 @@ function approaching(name){
   return { d:best.d, ll:best.ll, names };
 }
 
+// ---------- block number ----------
+function around(p, m){ const dLa = m/111320, dLo = m/(111320*Math.cos(rad(p[0]))); return bucketsFor([p[0]-dLa, p[1]-dLo], [p[0]+dLa, p[1]+dLo]); }
+// the street a house faces: nearest street, but only if it's clearly nearer than any other (corner houses are ambiguous)
+function nearestStreetTo(p){
+  const byName = new Map();
+  for (const k of around(p, 80)) for (const [w, i] of roads.grid.get(k) || []){
+    const A = w.pts[i], B = w.pts[i+1], d = segDist([0,0], toXY(A[0],A[1],p), toXY(B[0],B[1],p));
+    if (!byName.has(w.name) || d < byName.get(w.name)) byName.set(w.name, d);
+  }
+  const r = [...byName.entries()].sort((x, y) => x[1] - y[1]);
+  if (!r.length) return null;
+  return r.length === 1 || r[1][1] - r[0][1] > 8 ? r[0][0] : null;
+}
+function blockOf(name){
+  const near = [];
+  for (const k of around(pos, 70)) for (const a of roads.addrGrid.get(k) || []){
+    const d = dist(pos, a); if (d <= 70) near.push({ a, d });
+  }
+  near.sort((p, q) => p.d - q.d);
+  // nearest few houses that actually face this street (skips corner houses numbered on the cross street)
+  const votes = new Map(); let used = 0;
+  for (const { a } of near.slice(0, 14)){
+    if (nearestStreetTo(a) !== name) continue;
+    const b = Math.floor(a[2]/100)*100; votes.set(b, (votes.get(b) || 0) + (3 - used));
+    if (++used >= 3) break;
+  }
+  if (!votes.size) return null;
+  return [...votes.entries()].sort((p, q) => q[1] - p[1])[0][0];
+}
+
+// ---------- night mode ----------
+function setNight(on){
+  document.body.classList.toggle("night", on);
+  $("nightBtn").textContent = on ? "☀︎ Day" : "🌙 Night";
+  try { localStorage.setItem("sw_night", on ? "1" : "0"); } catch(e){}
+}
+
 function streetGeometry(name){
   const lines = [];
   for (const w of roads.ways) if (w.name === name)
@@ -442,6 +512,8 @@ function update(){
   if (cur){
     const name = cur.way.name;
     $("street").textContent = name;
+    const blk = blockOf(name);
+    $("streetSub").textContent = blk != null ? `${blk} block` : "";
     if (name !== lastName){
       streetLine.setLatLngs(streetGeometry(name)); if (!map.hasLayer(streetLine)) streetLine.addTo(map);
       lastName = name;
@@ -457,11 +529,11 @@ function update(){
       if (map.hasLayer(nextMarker)) map.removeLayer(nextMarker);
     }
   } else if (roads.ways.length){
-    $("street").textContent = "Off road";
+    $("street").textContent = "Off road"; $("streetSub").textContent = "";
     $("next").textContent = "—"; $("nextDist").textContent = "";
   } else {
     nominatimName();
-    $("street").textContent = fallbackName || "—";
+    $("street").textContent = fallbackName || "—"; $("streetSub").textContent = "";
     $("next").textContent = "Needs street data";
     $("nextDist").textContent = "";
   }
@@ -537,6 +609,10 @@ $("goDemo").onclick = () => { $("start").style.display = "none"; setDemo(true);
 $("demoBtn").onclick = () => setDemo(!demo);
 $("speedBox").onclick = () => { useMph = !useMph; try { localStorage.setItem("sw_mph", useMph?"1":"0"); } catch(e){} update(); };
 $("recenter").onclick = () => { follow = true; $("recenter").style.display = "none"; if (pos) map.setView(pos, Math.max(map.getZoom(),16)); };
+$("nightBtn").onclick = () => setNight(!document.body.classList.contains("night"));
+{ let n = null; try { n = localStorage.getItem("sw_night"); } catch(e){}
+  const h = new Date().getHours();
+  setNight(n === null ? (h >= 18 || h < 7) : n === "1"); }
 </script>
 </body>
 </html>
