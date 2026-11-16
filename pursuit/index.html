@@ -79,7 +79,7 @@
 <button id="demoBtn" class="btn">Demo</button>
 
 <div id="start">
-  <h1>Streetwise Pursuit <span>p1</span></h1>
+  <h1>Streetwise Pursuit <span>p2</span></h1>
   <p>Built for fast driving: back lanes, lag compensation, GPS warnings, and offline street data.</p>
   <button id="go">Start</button>
   <button id="dl" class="ghost">Download Winnipeg for offline use</button>
@@ -92,7 +92,7 @@
 </script>
 <script>
 // ---------- settings ----------
-const VERSION = "p1";
+const VERSION = "p2";
 const TZ = 14;                    // street data in zoom-14 tiles (~1.5 km squares)
 const KEEP_RADIUS = 5000;         // m: tiles kept in memory around you
 const CACHE_DAYS = 60;
@@ -146,6 +146,7 @@ function bearing(a, b){
 }
 function angDiff(a, b){ let d = Math.abs(a-b)%360; return d>180 ? 360-d : d; }
 function lineDiff(a, b){ return Math.min(angDiff(a,b), angDiff((a+180)%360, b)); }   // ignores direction
+const closestPt = (p, a, b) => closest(p, a, b);
 function closest(p, a, b){
   const dx=b[0]-a[0], dy=b[1]-a[1], L2=dx*dx+dy*dy;
   let t = L2 ? ((p[0]-a[0])*dx+(p[1]-a[1])*dy)/L2 : 0; t = Math.max(0,Math.min(1,t));
@@ -418,7 +419,7 @@ function approachingOnStreet(name){
   const hits = [];
   const consider = (d, ll, other) => {
     if (d < 12 || d > LOOKAHEAD_MAX || other === name) return;
-    if (angDiff(bearing(pos, ll), heading) > AHEAD_ANGLE) return;
+    if (angDiff(bearing(pos, ll), heading) > (d < 100 ? 75 : AHEAD_ANGLE)) return;   // wider when close (curves)
     hits.push({ d, ll, name:other });
   };
   const checked = new Set();
@@ -432,12 +433,19 @@ function approachingOnStreet(name){
       const A = w.pts[i], B = w.pts[i+1];
       if (Math.min(dist(pos, A), dist(pos, B)) > LOOKAHEAD_MAX + 1000) continue;
       const a = toXY(A[0],A[1],pos), b = toXY(B[0],B[1],pos);
-      for (const k of bucketsFor(A, B)) for (const [o, j] of roads.grid.get(k) || []){
+      const pd = 0.00015;   // look a little beyond the segment for nearby street ends
+      for (const k of bucketsFor([Math.min(A[0],B[0])-pd, Math.min(A[1],B[1])-pd*1.5], [Math.max(A[0],B[0])+pd, Math.max(A[1],B[1])+pd*1.5])) for (const [o, j] of roads.grid.get(k) || []){
         if (o.name === name) continue;
         const id = w.id+"/"+i+"|"+o.id+"/"+j; if (checked.has(id)) continue; checked.add(id);
         const C = o.pts[j], D = o.pts[j+1];
         const x = segIntersect(a, b, toXY(C[0],C[1],pos), toXY(D[0],D[1],pos));
         if (x) consider(Math.hypot(x[0], x[1]), toLL(x), o.name);
+        // T-junction: a street that ends at yours. Map simplification can leave a gap of a few metres.
+        for (const E of [j === 0 ? C : null, j === o.pts.length-2 ? D : null]){
+          if (!E) continue;
+          const ex = toXY(E[0],E[1],pos), cp = closestPt(ex, a, b);
+          if (Math.hypot(ex[0]-cp[0], ex[1]-cp[1]) < 12) consider(Math.hypot(cp[0], cp[1]), toLL(cp), o.name);
+        }
       }
     }
   }
