@@ -32,6 +32,34 @@
   #streetSub:empty { display:none; }
   .btn.left { left:12px; right:auto; }
   #nightBtn { bottom:calc(20px + env(safe-area-inset-bottom)); }
+  #memosBtn { bottom:calc(70px + env(safe-area-inset-bottom)); }
+  #memoBtn { position:absolute; z-index:1000; left:50%; transform:translateX(-50%); bottom:calc(16px + env(safe-area-inset-bottom));
+    background:#d93636; color:#fff; border:0; border-radius:40px; padding:16px 26px; font-size:19px; font-weight:800;
+    box-shadow:0 6px 20px rgba(0,0,0,.45); white-space:nowrap; }
+  #memoBtn.rec { background:#fff; color:#d93636; animation:pulse 1.2s infinite; }
+  @keyframes pulse { 50% { box-shadow:0 0 0 10px rgba(217,54,54,.35); } }
+  #callerBtn { position:absolute; z-index:1000; left:50%; transform:translateX(-50%); bottom:calc(84px + env(safe-area-inset-bottom));
+    background:var(--card); color:var(--fg); border:1px solid #3a4150; border-radius:20px; padding:8px 14px; font-size:15px; font-weight:700; white-space:nowrap; }
+  #recLive { position:absolute; z-index:1000; left:12px; right:12px; bottom:calc(132px + env(safe-area-inset-bottom));
+    background:var(--card); border-radius:12px; padding:10px 12px; font-size:16px; display:none; }
+  #recLive.on { display:block; }
+  #memoPanel { position:absolute; left:8px; right:8px; top:calc(8px + env(safe-area-inset-top)); bottom:calc(8px + env(safe-area-inset-bottom));
+    z-index:1500; background:#14171d; border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,.6); display:none; flex-direction:column; }
+  #memoPanel.open { display:flex; }
+  .mpHead { display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid #2a2f3a; }
+  .mpHead b { flex:1; font-size:18px; }
+  .mpHead button, .memo button { background:#2a2f3a; color:var(--fg); border:0; border-radius:10px; padding:8px 12px; font-size:14px; font-weight:600; }
+  .mpCallers { padding:10px 14px; border-bottom:1px solid #2a2f3a; font-size:13px; color:var(--dim); }
+  .mpCallers input { width:100%; margin-top:4px; background:#0f1115; color:var(--fg); border:1px solid #2a2f3a; border-radius:8px; padding:8px; font-size:15px; }
+  #memoList { overflow-y:auto; padding:8px 14px 16px; flex:1; }
+  .memo { border-bottom:1px solid #2a2f3a; padding:10px 0; }
+  .memo .mh { font-weight:800; font-size:16px; }
+  .memo .mh span { color:var(--accent); }
+  .memo .ml { color:var(--dim); font-size:14px; margin:2px 0 6px; }
+  .memo textarea { width:100%; min-height:54px; background:#0f1115; color:var(--fg); border:1px solid #2a2f3a; border-radius:8px; padding:8px; font-size:15px; font-family:inherit; }
+  .memo audio { width:100%; height:36px; margin-top:6px; }
+  .memo .mb { display:flex; gap:8px; margin-top:6px; }
+  .empty { color:var(--dim); padding:14px 0; }
   body.night .leaflet-tile-pane { filter:invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); }
   body.night .leaflet-container { background:#1b1d22; }
   .btn { position:absolute; z-index:1000; right:12px; background:var(--card); color:var(--fg); border:0;
@@ -75,9 +103,20 @@
 <button id="recenter" class="btn">◎ Follow</button>
 <button id="demoBtn" class="btn">Demo</button>
 <button id="nightBtn" class="btn left">🌙 Night</button>
+<button id="memosBtn" class="btn left">Memos</button>
+<button id="callerBtn">📣 Me</button>
+<button id="memoBtn">🎙 Memo</button>
+<div id="recLive"></div>
+
+<div id="memoPanel">
+  <div class="mpHead"><b>Memos</b><button id="memoCopy">Copy all</button><button id="memoShare">Share</button><button id="memoClose">✕</button></div>
+  <div class="mpCallers">Who can make a call (comma separated, tap 📣 on the map to switch)
+    <input id="callerInput" placeholder="Me, Unit 2, Unit 3"></div>
+  <div id="memoList"></div>
+</div>
 
 <div id="start">
-  <h1>Streetwise <span style="font-size:14px;color:var(--dim)">v9</span></h1>
+  <h1>Streetwise <span style="font-size:14px;color:var(--dim)">v10</span></h1>
   <p>Shows the street you're on, your speed, and the next cross street ahead. Uses your phone's GPS and OpenStreetMap.</p>
   <button id="go">Start</button>
   <button id="goDemo" class="ghost">Try demo (tap the map to drive)</button>
@@ -88,7 +127,7 @@
 </script>
 <script>
 // ---------- settings ----------
-const VERSION = "v9";
+const VERSION = "v10";
 const TZ = 14;                             // street data is loaded in zoom-14 tiles (~1.5 km squares)
 const KEEP_RADIUS = 4000;                  // m: drop squares from memory beyond this
 const CACHE_DAYS = 30;                     // squares are saved on the phone this long
@@ -169,8 +208,11 @@ function project(ll, brg, d){
 let dbP = null;
 function db(){
   if (!dbP) dbP = new Promise((res, rej) => {
-    const r = indexedDB.open("streetwise", 1);
-    r.onupgradeneeded = () => r.result.createObjectStore("tiles");
+    const r = indexedDB.open("streetwise", 2);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains("tiles")) r.result.createObjectStore("tiles");
+      if (!r.result.objectStoreNames.contains("memos")) r.result.createObjectStore("memos", { keyPath:"id" });
+    };
     r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
   });
   return dbP;
@@ -470,6 +512,151 @@ function blockOf(name){
   return [...votes.entries()].sort((p, q) => q[1] - p[1])[0][0];
 }
 
+// ---------- voice memos ----------
+// Each memo: audio + live transcript (when the phone allows) + time, caller, and where you were when it started.
+async function memoStore(mode){ const d = await db(); return d.transaction("memos", mode).objectStore("memos"); }
+async function memoPut(m){ try { const st = await memoStore("readwrite"); await new Promise(r => { const q = st.put(m); q.onsuccess = r; q.onerror = r; }); } catch(e){} }
+async function memoDel(id){ try { const st = await memoStore("readwrite"); await new Promise(r => { const q = st.delete(id); q.onsuccess = r; q.onerror = r; }); } catch(e){} }
+async function memoAll(){ try { const st = await memoStore("readonly");
+  return await new Promise(r => { const q = st.getAll(); q.onsuccess = () => r(q.result || []); q.onerror = () => r([]); }); } catch(e){ return []; } }
+
+let callers = ["Me"], callerIdx = 0;
+try { callers = JSON.parse(localStorage.getItem("sw_callers") || '["Me"]'); callerIdx = +(localStorage.getItem("sw_caller") || 0); } catch(e){}
+if (!callers.length) callers = ["Me"];
+if (callerIdx >= callers.length) callerIdx = 0;
+function showCaller(){ $("callerBtn").textContent = "📣 " + callers[callerIdx]; }
+function saveCallers(){ try { localStorage.setItem("sw_callers", JSON.stringify(callers)); localStorage.setItem("sw_caller", callerIdx); } catch(e){} }
+
+let rec = null, recStream = null, recChunks = [], recStamp = null, recTimer = null, recog = null, recText = "";
+const pad2 = n => String(n).padStart(2, "0");
+const hhmmss = t => { const d = new Date(t); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; };
+const BOUND = h => h == null ? "" : ["NB","EB","SB","WB"][Math.round(h/90) % 4];
+
+function snapshot(){
+  const nextTxt = $("next").textContent, ok = nextTxt && !/^(—|Start moving…|Needs street data)$/.test(nextTxt);
+  return { t:Date.now(), caller:callers[callerIdx], ll:pos ? [r6(pos[0]), r6(pos[1])] : null,
+    street:$("street").textContent, block:$("streetSub").textContent, dir:BOUND(heading),
+    next: ok ? nextTxt : "", nextDist: ok ? $("nextDist").textContent : "" };
+}
+function locLine(m){
+  let s = m.street && m.street !== "—" ? m.street : "Unknown location";
+  if (m.block) s += ` (${m.block})`;
+  if (m.dir) s += ` ${m.dir}`;
+  if (m.next) s += `, approaching ${m.next}` + (m.nextDist ? ` ${m.nextDist}` : "");
+  return s;
+}
+
+async function startMemo(){
+  if (!navigator.mediaDevices || !window.MediaRecorder){ flashMemo("Recording not supported here"); return; }
+  try { recStream = await navigator.mediaDevices.getUserMedia({ audio:true }); }
+  catch(e){ flashMemo("Microphone blocked"); return; }
+  const type = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find(t => MediaRecorder.isTypeSupported(t));
+  rec = new MediaRecorder(recStream, type ? { mimeType:type } : undefined);
+  recChunks = []; rec.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
+  rec.onstop = finishMemo;
+  rec.start(1000);
+  recStamp = snapshot();
+  $("memoBtn").classList.add("rec");
+  const tick = () => { const s = Math.round((Date.now() - recStamp.t)/1000); $("memoBtn").textContent = `■ Stop ${Math.floor(s/60)}:${pad2(s%60)}`; };
+  tick(); recTimer = setInterval(tick, 500);
+  startTranscribe();
+}
+function startTranscribe(){
+  recText = ""; $("recLive").textContent = "Listening…"; $("recLive").classList.add("on");
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR){ $("recLive").textContent = "Recording (no live transcript on this phone)"; return; }
+  let finals = "";
+  try {
+    recog = new SR(); recog.lang = "en-CA"; recog.continuous = true; recog.interimResults = true;
+    recog.onresult = e => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++){
+        const r = e.results[i]; if (r.isFinal) finals += r[0].transcript.trim() + " "; else interim += r[0].transcript;
+      }
+      recText = (finals + interim).trim(); $("recLive").textContent = recText || "Listening…";
+    };
+    recog.onerror = () => {};
+    recog.onend = () => { if (rec && rec.state === "recording") try { recog.start(); } catch(e){} };   // keep going on long memos
+    recog.start();
+  } catch(e){ recog = null; $("recLive").textContent = "Recording (transcript unavailable)"; }
+}
+function stopMemo(){
+  if (!rec || rec.state !== "recording") return;
+  clearInterval(recTimer);
+  $("memoBtn").textContent = "Saving…";
+  if (recog){ const r = recog; recog = null; r.onend = null; try { r.stop(); } catch(e){} }
+  setTimeout(() => { try { rec.stop(); } catch(e){ finishMemo(); } }, 700);   // give the transcript a moment to finish
+}
+async function finishMemo(){
+  if (recStream) recStream.getTracks().forEach(t => t.stop());
+  const blob = recChunks.length ? new Blob(recChunks, { type:(rec && rec.mimeType) || "audio/mp4" }) : null;
+  const m = { id:recStamp.t, ...recStamp, dur:Math.round((Date.now() - recStamp.t)/1000), text:recText, audio:blob };
+  rec = null; recStream = null; recChunks = [];
+  await memoPut(m);
+  $("memoBtn").classList.remove("rec"); $("memoBtn").textContent = "🎙 Memo";
+  $("recLive").classList.remove("on");
+  flashMemo("Memo saved ✓");
+  updateMemoCount();
+  if ($("memoPanel").classList.contains("open")) renderMemos();
+}
+function flashMemo(t){ const b = $("memosBtn"); b.textContent = t; setTimeout(updateMemoCount, 2000); }
+async function updateMemoCount(){ const n = (await memoAll()).length; $("memosBtn").textContent = n ? `Memos (${n})` : "Memos"; }
+
+let audioURLs = [];
+async function renderMemos(){
+  audioURLs.forEach(u => URL.revokeObjectURL(u)); audioURLs = [];
+  const list = $("memoList"), memos = (await memoAll()).sort((a, b) => b.t - a.t);
+  list.innerHTML = "";
+  if (!memos.length){ list.innerHTML = '<div class="empty">No memos yet. Tap 🎙 Memo on the map, talk, then tap Stop.</div>'; return; }
+  for (const m of memos){
+    const el = document.createElement("div"); el.className = "memo";
+    const h = document.createElement("div"); h.className = "mh";
+    h.textContent = hhmmss(m.t) + " — "; const c = document.createElement("span"); c.textContent = m.caller; h.append(c);
+    const l = document.createElement("div"); l.className = "ml"; l.textContent = locLine(m);
+    const ta = document.createElement("textarea"); ta.value = m.text || ""; ta.placeholder = "Type or correct what was said…";
+    ta.onchange = () => { m.text = ta.value; memoPut(m); };
+    el.append(h, l, ta);
+    if (m.audio){ const a = document.createElement("audio"); a.controls = true; a.preload = "metadata";
+      const u = URL.createObjectURL(m.audio); audioURLs.push(u); a.src = u; el.append(a); }
+    const bar = document.createElement("div"); bar.className = "mb";
+    if (m.audio && navigator.canShare){
+      const sh = document.createElement("button"); sh.textContent = "Share audio";
+      sh.onclick = async () => {
+        const ext = (m.audio.type || "").includes("webm") ? "webm" : "m4a";
+        const f = new File([m.audio], `memo-${new Date(m.t).toISOString().slice(0,19).replace(/[T:]/g, "-")}.${ext}`, { type:m.audio.type });
+        try { if (navigator.canShare({ files:[f] })) await navigator.share({ files:[f], title:"Memo " + hhmmss(m.t) }); } catch(e){}
+      };
+      bar.append(sh);
+    }
+    const del = document.createElement("button"); del.textContent = "Delete"; let armed = false;
+    del.onclick = async () => { if (!armed){ armed = true; del.textContent = "Tap again to delete"; setTimeout(() => { armed = false; del.textContent = "Delete"; }, 2500); return; }
+      await memoDel(m.id); renderMemos(); updateMemoCount(); };
+    bar.append(del); el.append(bar);
+    list.append(el);
+  }
+}
+async function memoText(){
+  const memos = (await memoAll()).sort((a, b) => a.t - b.t);
+  if (!memos.length) return "";
+  const day = new Date(memos[0].t).toLocaleDateString("en-CA");
+  return `Surveillance memos — ${day}\n\n` + memos.map(m =>
+    `${hhmmss(m.t)} — ${m.caller} — ${locLine(m)}\n  ${m.text ? `"${m.text}"` : "(audio only, no transcript)"}`).join("\n\n");
+}
+async function copyMemos(){
+  const text = await memoText(), btn = $("memoCopy");
+  const done = ok => { btn.textContent = ok ? "Copied ✓" : "Copy failed"; setTimeout(() => btn.textContent = "Copy all", 1800); };
+  const fallback = () => { const ta = document.createElement("textarea"); ta.value = text; document.body.append(ta); ta.select();
+    let ok = false; try { ok = document.execCommand("copy"); } catch(e){} ta.remove(); done(ok); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => done(true), fallback); else fallback();
+}
+async function shareMemos(){
+  const text = await memoText();
+  try {
+    if (navigator.share) await navigator.share({ title:"Surveillance memos", text });
+    else copyMemos();
+  } catch(e){}
+}
+
 // ---------- night mode ----------
 function setNight(on){
   document.body.classList.toggle("night", on);
@@ -610,6 +797,17 @@ $("demoBtn").onclick = () => setDemo(!demo);
 $("speedBox").onclick = () => { useMph = !useMph; try { localStorage.setItem("sw_mph", useMph?"1":"0"); } catch(e){} update(); };
 $("recenter").onclick = () => { follow = true; $("recenter").style.display = "none"; if (pos) map.setView(pos, Math.max(map.getZoom(),16)); };
 $("nightBtn").onclick = () => setNight(!document.body.classList.contains("night"));
+$("memoBtn").onclick = () => (rec && rec.state === "recording") ? stopMemo() : startMemo();
+$("callerBtn").onclick = () => { callerIdx = (callerIdx + 1) % callers.length; saveCallers(); showCaller(); };
+$("memosBtn").onclick = () => { $("callerInput").value = callers.join(", "); $("memoPanel").classList.add("open"); renderMemos(); };
+$("memoClose").onclick = () => $("memoPanel").classList.remove("open");
+$("memoCopy").onclick = copyMemos;
+$("memoShare").onclick = shareMemos;
+$("callerInput").onchange = () => {
+  const list = $("callerInput").value.split(",").map(x => x.trim()).filter(Boolean);
+  callers = list.length ? list : ["Me"]; if (callerIdx >= callers.length) callerIdx = 0; saveCallers(); showCaller();
+};
+showCaller(); updateMemoCount();
 { let n = null; try { n = localStorage.getItem("sw_night"); } catch(e){}
   const h = new Date().getHours();
   setNight(n === null ? (h >= 18 || h < 7) : n === "1"); }
